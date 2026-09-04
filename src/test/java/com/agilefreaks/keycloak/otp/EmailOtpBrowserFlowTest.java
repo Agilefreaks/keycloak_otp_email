@@ -8,6 +8,8 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -110,9 +112,9 @@ class EmailOtpBrowserFlowTest {
     ArgumentCaptor<Map<String, Object>> attributes = ArgumentCaptor.forClass(Map.class);
     verify(email)
         .send(
-            eq(EmailOtpAuthenticator.DEFAULT_EMAIL_SUBJECT_KEY),
+            eq(OtpConfig.DEFAULT_EMAIL_SUBJECT_KEY),
             anyList(),
-            eq(EmailOtpAuthenticator.DEFAULT_EMAIL_TEMPLATE),
+            eq(OtpConfig.DEFAULT_EMAIL_TEMPLATE),
             attributes.capture());
     Object code = attributes.getValue().get("code");
     assertNotNull(code);
@@ -122,7 +124,7 @@ class EmailOtpBrowserFlowTest {
   private List<FormMessage> captureLastErrors() {
     @SuppressWarnings("unchecked")
     ArgumentCaptor<List<FormMessage>> captor = ArgumentCaptor.forClass(List.class);
-    verify(form, org.mockito.Mockito.atLeastOnce()).setErrors(captor.capture());
+    verify(form, atLeastOnce()).setErrors(captor.capture());
     return captor.getAllValues().get(captor.getAllValues().size() - 1);
   }
 
@@ -281,7 +283,7 @@ class EmailOtpBrowserFlowTest {
 
   @Test
   void aFailedSendShowsAnErrorAndLeavesNoCodeBehind() throws Exception {
-    org.mockito.Mockito.doThrow(new EmailException("smtp down"))
+    doThrow(new EmailException("smtp down"))
         .when(email)
         .send(anyString(), anyList(), anyString(), anyMap());
 

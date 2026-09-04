@@ -36,49 +36,36 @@ public record OtpConfig(
   public static final int DEFAULT_MAX_SENDS_PER_EMAIL_PER_DAY = 5;
   public static final int DEFAULT_MAX_SENDS_PER_IP_PER_HOUR = 10;
   public static final int DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR = 500;
+  public static final String DEFAULT_EMAIL_TEMPLATE = "code-email.ftl";
+  public static final String DEFAULT_EMAIL_SUBJECT_KEY = "emailCodeSubject";
 
   public static OtpConfig from(AuthenticatorConfigModel model) {
     Map<String, String> config =
         (model == null || model.getConfig() == null) ? Map.of() : model.getConfig();
     return new OtpConfig(
-        positive(config, CONFIG_CODE_LENGTH, DEFAULT_CODE_LENGTH),
-        positive(config, CONFIG_CODE_TTL_SECONDS, DEFAULT_CODE_TTL_SECONDS),
-        atLeastZero(config, CONFIG_RESEND_COOLDOWN_SECONDS, DEFAULT_RESEND_COOLDOWN_SECONDS),
-        atLeastZero(config, CONFIG_MAX_ATTEMPTS, DEFAULT_MAX_ATTEMPTS),
-        atLeastZero(
-            config, CONFIG_MAX_SENDS_PER_EMAIL_PER_DAY, DEFAULT_MAX_SENDS_PER_EMAIL_PER_DAY),
-        atLeastZero(config, CONFIG_MAX_SENDS_PER_IP_PER_HOUR, DEFAULT_MAX_SENDS_PER_IP_PER_HOUR),
-        atLeastZero(
-            config, CONFIG_MAX_SENDS_PER_REALM_PER_HOUR, DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR),
-        text(config, CONFIG_START_TOKEN_HEADER),
-        text(config, CONFIG_START_TOKEN_VERIFY_URL),
-        textOr(config, CONFIG_EMAIL_TEMPLATE, EmailOtpAuthenticator.DEFAULT_EMAIL_TEMPLATE),
-        textOr(config, CONFIG_EMAIL_SUBJECT_KEY, EmailOtpAuthenticator.DEFAULT_EMAIL_SUBJECT_KEY));
+        number(config, CONFIG_CODE_LENGTH, 1, DEFAULT_CODE_LENGTH),
+        number(config, CONFIG_CODE_TTL_SECONDS, 1, DEFAULT_CODE_TTL_SECONDS),
+        number(config, CONFIG_RESEND_COOLDOWN_SECONDS, 0, DEFAULT_RESEND_COOLDOWN_SECONDS),
+        number(config, CONFIG_MAX_ATTEMPTS, 0, DEFAULT_MAX_ATTEMPTS),
+        number(config, CONFIG_MAX_SENDS_PER_EMAIL_PER_DAY, 0, DEFAULT_MAX_SENDS_PER_EMAIL_PER_DAY),
+        number(config, CONFIG_MAX_SENDS_PER_IP_PER_HOUR, 0, DEFAULT_MAX_SENDS_PER_IP_PER_HOUR),
+        number(
+            config, CONFIG_MAX_SENDS_PER_REALM_PER_HOUR, 0, DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR),
+        text(config, CONFIG_START_TOKEN_HEADER, ""),
+        text(config, CONFIG_START_TOKEN_VERIFY_URL, ""),
+        text(config, CONFIG_EMAIL_TEMPLATE, DEFAULT_EMAIL_TEMPLATE),
+        text(config, CONFIG_EMAIL_SUBJECT_KEY, DEFAULT_EMAIL_SUBJECT_KEY));
   }
 
-  private static String textOr(Map<String, String> config, String key, String fallback) {
-    String value = text(config, key);
-    return value.isEmpty() ? fallback : value;
-  }
-
-  private static String text(Map<String, String> config, String key) {
+  private static String text(Map<String, String> config, String key, String fallback) {
     String value = config.get(key);
-    return (value == null || value.isBlank()) ? "" : value.trim();
+    return (value == null || value.isBlank()) ? fallback : value.trim();
   }
 
-  private static int positive(Map<String, String> config, String key, int fallback) {
-    int parsed = atLeastZero(config, key, fallback);
-    return parsed > 0 ? parsed : fallback;
-  }
-
-  private static int atLeastZero(Map<String, String> config, String key, int fallback) {
-    String value = text(config, key);
-    if (value.isEmpty()) {
-      return fallback;
-    }
+  private static int number(Map<String, String> config, String key, int min, int fallback) {
     try {
-      int parsed = Integer.parseInt(value);
-      return parsed >= 0 ? parsed : fallback;
+      int value = Integer.parseInt(text(config, key, ""));
+      return value >= min ? value : fallback;
     } catch (NumberFormatException e) {
       return fallback;
     }

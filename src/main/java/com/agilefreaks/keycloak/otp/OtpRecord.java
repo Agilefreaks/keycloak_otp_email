@@ -38,12 +38,17 @@ public record OtpRecord(String hash, String salt, int attempts, long sentAtEpoch
               salt,
               Integer.parseInt(notes.get(NOTE_ATTEMPTS)),
               Long.parseLong(notes.get(NOTE_SENT_AT))));
-    } catch (NumberFormatException | NullPointerException e) {
+    } catch (NumberFormatException e) {
       return Optional.empty();
     }
   }
 
   public OtpRecord withAttempt() {
     return new OtpRecord(hash, salt, attempts + 1, sentAtEpochSeconds);
+  }
+
+  /** {@code maxAttempts} of 0 means no cap. */
+  public boolean exhausted(int maxAttempts) {
+    return maxAttempts > 0 && attempts >= maxAttempts;
   }
 }

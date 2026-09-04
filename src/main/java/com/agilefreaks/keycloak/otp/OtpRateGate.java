@@ -54,23 +54,20 @@ public class OtpRateGate {
     }
 
     // Every guard is read before any is written, so a refusal never charges the ones that passed.
-    List<Guard> passed = new ArrayList<>(guards.size());
-    List<CounterRecord> incremented = new ArrayList<>(guards.size());
+    List<CounterRecord> charged = new ArrayList<>(guards.size());
     for (Guard guard : guards) {
       CounterRecord current = currentCount(guard, now);
       if (current.count() >= guard.limit()) {
         long elapsed = now - current.windowStartEpochSeconds();
         return new Decision(guard.outcome(), Math.max(guard.windowSeconds() - elapsed, 1));
       }
-      passed.add(guard);
-      incremented.add(current.increment());
+      charged.add(current.increment());
     }
 
-    for (int i = 0; i < passed.size(); i++) {
-      Guard guard = passed.get(i);
-      store.put(guard.key(), incremented.get(i).toNotes(), guard.windowSeconds());
+    for (int i = 0; i < guards.size(); i++) {
+      store.put(guards.get(i).key(), charged.get(i).toNotes(), guards.get(i).windowSeconds());
     }
-    return Decision.allow();
+    return new Decision(Outcome.ALLOW, 0);
   }
 
   private CounterRecord currentCount(Guard guard, long now) {
@@ -90,10 +87,6 @@ public class OtpRateGate {
   }
 
   public record Decision(Outcome outcome, long retryAfterSeconds) {
-
-    public static Decision allow() {
-      return new Decision(Outcome.ALLOW, 0);
-    }
 
     public boolean allowed() {
       return outcome == Outcome.ALLOW;

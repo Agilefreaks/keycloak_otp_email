@@ -5,9 +5,7 @@ public final class OtpKeys {
 
   private static final String PREFIX = "keycloak-otp-email:";
 
-  private OtpKeys() {
-    throw new UnsupportedOperationException("OtpKeys is a utility class");
-  }
+  private OtpKeys() {}
 
   public static String code(String userId) {
     return PREFIX + "code:" + userId;
