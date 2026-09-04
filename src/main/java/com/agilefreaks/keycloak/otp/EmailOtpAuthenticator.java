@@ -137,14 +137,24 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   /** Gathers what every branch needs, or fails the flow and returns null. */
   private Step open(AuthenticationFlowContext context) {
     UserModel user = context.getUser();
-    if (user == null || user.getEmail() == null || user.getEmail().isBlank()) {
+    if (user != null && user.getEmail() != null && !user.getEmail().isBlank()) {
+      return new Step(context, user, OtpConfig.from(context.getAuthenticatorConfig()));
+    }
+
+    // Nothing to mail to. A federated user with no mail attribute can reach this in a browser
+    // flow, and answering that with a JSON body would put a token-endpoint payload on a web page.
+    LOG.warnf(
+        "No email address for the user on this flow; cannot send a code (user=%s)",
+        user == null ? "none" : user.getId());
+    if (FLOW_PATH_TOKEN.equals(context.getFlowPath())) {
       context.failure(
           AuthenticationFlowError.INVALID_USER,
           JsonResponses.error(
               400, JsonResponses.ERROR_INVALID_REQUEST, "Missing parameter: username"));
-      return null;
+    } else {
+      context.failure(AuthenticationFlowError.INVALID_USER);
     }
-    return new Step(context, user, OtpConfig.from(context.getAuthenticatorConfig()));
+    return null;
   }
 
   /** Everything one invocation needs, resolved once. */
@@ -178,37 +188,37 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     MAIL_FAILED
   }
 
-  /** Runs the send, then renders the outcome the way this flow expects. */
+  /**
+   * Runs the send, then renders the outcome the way this flow expects.
+   *
+   * <p>Every outcome here is a challenge, never a failure: asking for a code, refusing to send
+   * another one yet and failing to reach the mail server are all things that happen before any
+   * credential has been offered. Reporting them with {@code context.failure} would be wrong twice
+   * over — {@code DefaultAuthenticationFlow} answers both {@code FAILED} and
+   * {@code FAILURE_CHALLENGE} by calling {@code AuthenticationProcessor.logFailure()}, so a realm
+   * with brute-force protection on would count each of these against the user and lock them out for
+   * simply requesting codes.
+   */
   private void sendAndReport(Step step) {
     long[] retryAfter = new long[1];
     SendResult result = deliverCode(step, retryAfter);
 
     if (step.directGrant) {
-      switch (result) {
-        case SENT ->
-            step.context.failure(
-                AuthenticationFlowError.INVALID_CREDENTIALS,
-                JsonResponses.otpRequired(step.user.getEmail(), step.config.codeTtlSeconds()));
-        case THROTTLED ->
-            step.context.failure(
-                AuthenticationFlowError.INVALID_CREDENTIALS,
-                JsonResponses.throttled(retryAfter[0]));
-        case BUDGET_EXHAUSTED ->
-            step.context.failure(
-                AuthenticationFlowError.INVALID_CREDENTIALS,
-                JsonResponses.temporarilyUnavailable("code sending is temporarily unavailable"));
-        case ATTESTATION_MISSING ->
-            step.context.failure(
-                AuthenticationFlowError.ACCESS_DENIED,
+      Response response =
+          switch (result) {
+            case SENT ->
+                JsonResponses.otpRequired(step.user.getEmail(), step.config.codeTtlSeconds());
+            case THROTTLED -> JsonResponses.throttled(retryAfter[0]);
+            case BUDGET_EXHAUSTED ->
+                JsonResponses.temporarilyUnavailable("code sending is temporarily unavailable");
+            case ATTESTATION_MISSING ->
                 JsonResponses.error(
-                    400,
-                    JsonResponses.ERROR_INVALID_REQUEST,
-                    "Missing or invalid app attestation"));
-        case MAIL_FAILED ->
-            step.context.failure(
-                AuthenticationFlowError.INTERNAL_ERROR,
-                JsonResponses.temporarilyUnavailable("could not send the code"));
-      }
+                    400, JsonResponses.ERROR_INVALID_REQUEST, "Missing or invalid app attestation");
+            case MAIL_FAILED -> JsonResponses.temporarilyUnavailable("could not send the code");
+          };
+      // forceChallenge, not challenge: the flow must stop here even though this execution is
+      // REQUIRED and has produced no user credential yet.
+      step.context.forceChallenge(response);
       return;
     }
 
@@ -257,19 +267,22 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
 
     String code = OtpCodes.generate(step.config.codeLength());
     String salt = OtpCodes.newSalt();
+
+    // Mail first, store second. A code the user never received must not replace the one they may
+    // already hold, nor sit there blocking the next send on the cooldown — and it cannot be undone
+    // after the fact, because the store applies writes when the request commits while its remove
+    // takes effect immediately.
+    try {
+      mail(step, code);
+    } catch (EmailException | RuntimeException e) {
+      LOG.warnf(e, "Could not mail a code to '%s'", step.user.getEmail());
+      return SendResult.MAIL_FAILED;
+    }
+
     step.store.put(
         step.key,
         new OtpRecord(OtpCodes.hash(salt, code), salt, 0, now).toNotes(),
         step.config.codeTtlSeconds());
-
-    try {
-      mail(step, code);
-    } catch (EmailException | RuntimeException e) {
-      // A code the user never received must not sit there blocking the next send on the cooldown.
-      step.store.remove(step.key);
-      LOG.warnf(e, "Could not mail a code to '%s'", step.user.getEmail());
-      return SendResult.MAIL_FAILED;
-    }
     return SendResult.SENT;
   }
 
@@ -329,9 +342,10 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
           default -> MSG_INVALID;
         };
     // A wrong guess can be the one that burns the code, so ask the store rather than the result.
-    boolean burned =
-        result != VerifyResult.NO_CODE && step.store.get(step.key).isEmpty();
-    challenge(step, new FormMessage(FIELD_CODE, message), burned);
+    boolean burned = result != VerifyResult.NO_CODE && step.store.get(step.key).isEmpty();
+    // A submitted code that did not match is a rejected credential; a missing or expired one is not.
+    boolean credentialRejected = result != VerifyResult.NO_CODE;
+    challenge(step, new FormMessage(FIELD_CODE, message), burned, credentialRejected);
   }
 
   private VerifyResult checkCode(Step step, String submitted) {
@@ -356,14 +370,10 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         // Re-stored with what is left of the original lifetime, never a fresh one.
         step.store.put(step.key, bumped.toNotes(), remainingTtl(record, step.config));
       }
-      // Direct grant does not feed Keycloak's brute-force counter on its own, so do it here.
-      step.context
-          .getProtector()
-          .failedLogin(
-              step.context.getRealm(),
-              step.user,
-              step.context.getConnection(),
-              step.context.getUriInfo());
+      // No failedLogin() call here: reporting this as a credential failure is enough. Keycloak's
+      // DefaultAuthenticationFlow calls AuthenticationProcessor.logFailure() for FAILED and
+      // FAILURE_CHALLENGE alike, which feeds the brute-force protector for us — in both flows.
+      // Counting it again here locked users out at half the configured failureFactor.
       // Say why the form just went dead, rather than "that code isn't right".
       return burned ? VerifyResult.TOO_MANY_ATTEMPTS : VerifyResult.INVALID;
     }
@@ -374,21 +384,35 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
 
   // ------------------------------------------------------------------ form rendering
 
-  /** Renders the code form, with a field-scoped error when there is one. */
-  private void challenge(Step step, FormMessage error, boolean maxAttemptsReached) {
+  /**
+   * Renders the code form, with a field-scoped error when there is one.
+   *
+   * <p>{@code failureChallenge} is reserved for a code that was actually wrong. Everything else —
+   * a cooldown, a send failure, an empty submission — goes out as a plain challenge, because
+   * {@code DefaultAuthenticationFlow} calls {@code logFailure()} on {@code FAILURE_CHALLENGE} too,
+   * and none of those are a failed credential.
+   */
+  private void challenge(
+      Step step, FormMessage error, boolean maxAttemptsReached, boolean credentialRejected) {
     LoginFormsProvider form =
         step.context
             .form()
             .setAttribute(ATTR_CODE_LENGTH, step.config.codeLength())
             .setAttribute(ATTR_MAX_ATTEMPTS_REACHED, maxAttemptsReached);
-
-    if (error == null) {
-      step.context.challenge(form.createForm(CODE_FORM_TEMPLATE));
-      return;
+    if (error != null) {
+      form = form.setErrors(List.of(error));
     }
 
-    Response response = form.setErrors(List.of(error)).createForm(CODE_FORM_TEMPLATE);
-    step.context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+    Response response = form.createForm(CODE_FORM_TEMPLATE);
+    if (credentialRejected) {
+      step.context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+    } else {
+      step.context.challenge(response);
+    }
+  }
+
+  private void challenge(Step step, FormMessage error, boolean maxAttemptsReached) {
+    challenge(step, error, maxAttemptsReached, false);
   }
 
   // ------------------------------------------------------------------ helpers
@@ -424,8 +448,9 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
    * rejection blocks the send, an unreachable verifier does not (overridable in tests).
    */
   boolean verifyAttestationToken(String verifyUrl, String token) {
+    HttpRequest request;
     try {
-      HttpRequest request =
+      request =
           HttpRequest.newBuilder(URI.create(verifyUrl))
               .timeout(Duration.ofSeconds(4))
               .header("Content-Type", "application/x-www-form-urlencoded")
@@ -433,6 +458,14 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
                   HttpRequest.BodyPublishers.ofString(
                       "token=" + URLEncoder.encode(token, StandardCharsets.UTF_8)))
               .build();
+    } catch (IllegalArgumentException e) {
+      // An unusable URL never becomes usable, so failing open here would quietly downgrade the
+      // check to "the header is present" for every request from now on.
+      LOG.errorf(e, "Attestation verify URL '%s' is not usable; rejecting the send", verifyUrl);
+      return false;
+    }
+
+    try {
       HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
       if (response.statusCode() != 200) {
         LOG.warnf("Attestation verifier returned HTTP %d; rejecting", response.statusCode());
@@ -440,6 +473,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       }
       return JsonSerialization.mapper.readTree(response.body()).path("success").asBoolean(false);
     } catch (Exception e) {
+      // A verifier that is merely unreachable must not lock everyone out.
       LOG.warnf(e, "Attestation verification call failed; allowing the send");
       return true;
     }

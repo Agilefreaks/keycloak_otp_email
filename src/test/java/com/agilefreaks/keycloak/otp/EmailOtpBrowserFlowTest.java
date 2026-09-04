@@ -183,8 +183,11 @@ class EmailOtpBrowserFlowTest {
     // The theme reads messagesPerField.get('emailCode'), so the error must be field-scoped.
     assertEquals(EmailOtpAuthenticator.FIELD_CODE, errors.get(0).getField());
     assertEquals(EmailOtpAuthenticator.MSG_INVALID, errors.get(0).getMessage());
+    // A wrong code is the one outcome that is a rejected credential, so it is the one that may
+    // reach failureChallenge — which is also what feeds the brute-force protector, so this
+    // authenticator must not call failedLogin() itself.
     verify(ctx).failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, formResponse);
-    verify(protector).failedLogin(eq(realm), eq(user), any(), any());
+    verify(protector, never()).failedLogin(any(), any(), any(), any());
     verify(ctx, never()).success();
     assertTrue(store.get(OtpKeys.code(USER_ID)).isPresent(), "one typo must not cost the code");
   }
@@ -272,6 +275,20 @@ class EmailOtpBrowserFlowTest {
     authenticator.action(ctx);
 
     verify(ctx).success();
+  }
+
+  @Test
+  void aCooldownOrSendFailureIsNeverAFailedLogin() throws Exception {
+    config.put(OtpConfig.CONFIG_RESEND_COOLDOWN_SECONDS, "30");
+    enterAndReadMailedCode();
+
+    formData.putSingle(EmailOtpAuthenticator.FIELD_RESEND, "");
+    authenticator.action(ctx); // refused by the cooldown
+
+    // Reloading the code page inside the cooldown used to charge a brute-force strike each time.
+    verify(ctx, never()).failureChallenge(any(), any());
+    verify(ctx, never()).failure(any(AuthenticationFlowError.class), any());
+    verify(protector, never()).failedLogin(any(), any(), any(), any());
   }
 
   @Test

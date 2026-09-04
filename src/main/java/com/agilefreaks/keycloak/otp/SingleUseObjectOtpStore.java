@@ -23,9 +23,14 @@ public class SingleUseObjectOtpStore implements OtpStore {
 
   @Override
   public void put(String key, Map<String, String> notes, long ttlSeconds) {
-    // put() refuses to overwrite an existing key, so an update is a remove followed by a put; that
-    // also makes the lifespan explicit on every write instead of inheriting the original one.
-    session.singleUseObjects().remove(key);
+    // Straight put, and deliberately no remove first. The Infinispan implementation defers put()
+    // to the request's transaction commit but applies remove() immediately, so removing first
+    // would make the key read as absent to every concurrent request for the rest of the request —
+    // long enough for a blocking mail send — and the rate-limit counters would read zero. The
+    // deferred put overwrites whatever is there when it lands.
+    //
+    // The one rule this imposes: never put the same key twice in a single request. The transaction
+    // rejects a second task for a key it already holds.
     session.singleUseObjects().put(key, ttlSeconds, notes);
   }
 
