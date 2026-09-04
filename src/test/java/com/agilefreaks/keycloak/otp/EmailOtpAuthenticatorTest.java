@@ -69,11 +69,30 @@ class EmailOtpAuthenticatorTest {
     user = mock(UserModel.class);
     email = mock(EmailTemplateProvider.class);
     protector = mock(BruteForceProtector.class);
-    HttpRequest request = mock(HttpRequest.class);
-    ClientConnection connection = mock(ClientConnection.class);
     form = new MultivaluedHashMap<>();
     config = new HashMap<>();
 
+    when(realm.getId()).thenReturn(REALM_ID);
+    when(realm.getName()).thenReturn("test-realm");
+    when(user.getId()).thenReturn(USER_ID);
+    when(user.getEmail()).thenReturn(EMAIL);
+    when(session.getProvider(EmailTemplateProvider.class)).thenReturn(email);
+    when(email.setRealm(realm)).thenReturn(email);
+    when(email.setUser(user)).thenReturn(email);
+    stubRequest();
+  }
+
+  /** Direct grant builds a fresh context per token request; this is the next one. */
+  private void nextRequest() {
+    reset(ctx);
+    stubRequest();
+  }
+
+  private void stubRequest() {
+    HttpRequest request = mock(HttpRequest.class);
+    ClientConnection connection = mock(ClientConnection.class);
+    AuthenticatorConfigModel model = new AuthenticatorConfigModel();
+    model.setConfig(config);
     when(ctx.getFlowPath()).thenReturn("token"); // what ROPC sets; the form flow sets something else
     when(ctx.getSession()).thenReturn(session);
     when(ctx.getRealm()).thenReturn(realm);
@@ -82,17 +101,10 @@ class EmailOtpAuthenticatorTest {
     when(ctx.getConnection()).thenReturn(connection);
     when(ctx.getUriInfo()).thenReturn(mock(UriInfo.class));
     when(ctx.getProtector()).thenReturn(protector);
-    when(ctx.getAuthenticatorConfig()).thenReturn(configModel());
+    when(ctx.getAuthenticatorConfig()).thenReturn(model);
     when(request.getDecodedFormParameters()).thenReturn(form);
     when(request.getHttpHeaders()).thenReturn(mock(HttpHeaders.class));
     when(connection.getRemoteAddr()).thenReturn("203.0.113.7");
-    when(realm.getId()).thenReturn(REALM_ID);
-    when(realm.getName()).thenReturn("test-realm");
-    when(user.getId()).thenReturn(USER_ID);
-    when(user.getEmail()).thenReturn(EMAIL);
-    when(session.getProvider(EmailTemplateProvider.class)).thenReturn(email);
-    when(email.setRealm(realm)).thenReturn(email);
-    when(email.setUser(user)).thenReturn(email);
   }
 
   /** A non-credential outcome must arrive as a challenge, or it feeds the brute-force protector. */
@@ -118,9 +130,9 @@ class EmailOtpAuthenticatorTest {
     ArgumentCaptor<Map<String, Object>> attributes = ArgumentCaptor.forClass(Map.class);
     verify(email)
         .send(
-            eq(EmailOtpAuthenticator.DEFAULT_EMAIL_SUBJECT_KEY),
+            eq(OtpConfig.DEFAULT_EMAIL_SUBJECT_KEY),
             anyList(),
-            eq(EmailOtpAuthenticator.DEFAULT_EMAIL_TEMPLATE),
+            eq(OtpConfig.DEFAULT_EMAIL_TEMPLATE),
             attributes.capture());
     Object code = attributes.getValue().get("code");
     assertNotNull(code, "the template must be given the code to render");
@@ -166,8 +178,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void secondStartInsideTheCooldownSendsNothing() throws Exception {
     authenticator.authenticate(ctx);
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
 
     clock.advanceSeconds(30);
     store.setNow(clock.epochSeconds());
@@ -184,8 +195,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void startAfterTheCooldownSendsAgain() throws Exception {
     authenticator.authenticate(ctx);
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
 
     clock.advanceSeconds(61);
     store.setNow(clock.epochSeconds());
@@ -201,8 +211,7 @@ class EmailOtpAuthenticatorTest {
 
     for (int i = 0; i < 2; i++) {
       authenticator.authenticate(ctx);
-      reset(ctx);
-      setUpContextAgain();
+      nextRequest();
     }
     authenticator.authenticate(ctx);
 
@@ -216,8 +225,7 @@ class EmailOtpAuthenticatorTest {
     config.put(OtpConfig.CONFIG_MAX_SENDS_PER_REALM_PER_HOUR, "1");
 
     authenticator.authenticate(ctx);
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     authenticator.authenticate(ctx);
 
     Response response = captureChallenge();
@@ -255,8 +263,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void correctCodeSignsTheUserIn() throws Exception {
     String code = startAndReadMailedCode();
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", code);
 
     authenticator.authenticate(ctx);
@@ -269,13 +276,11 @@ class EmailOtpAuthenticatorTest {
   @Test
   void aCodeIsSingleUse() throws Exception {
     String code = startAndReadMailedCode();
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", code);
     authenticator.authenticate(ctx);
 
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", code);
     authenticator.authenticate(ctx);
 
@@ -286,8 +291,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void wrongCodeIsRejectedAndCountedAgainstTheUser() throws Exception {
     startAndReadMailedCode();
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", "000000");
 
     authenticator.authenticate(ctx);
@@ -306,16 +310,14 @@ class EmailOtpAuthenticatorTest {
     String code = startAndReadMailedCode();
 
     for (int i = 0; i < 3; i++) {
-      reset(ctx);
-      setUpContextAgain();
+      nextRequest();
       form.putSingle("otp", "000000");
       authenticator.authenticate(ctx);
     }
 
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
 
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", code);
     authenticator.authenticate(ctx);
 
@@ -326,8 +328,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void anExpiredCodeIsRefused() throws Exception {
     String code = startAndReadMailedCode();
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
 
     clock.advanceSeconds(301);
     store.setNow(clock.epochSeconds());
@@ -351,29 +352,6 @@ class EmailOtpAuthenticatorTest {
     verifyNoMailSent();
   }
 
-  private AuthenticatorConfigModel configModel() {
-    AuthenticatorConfigModel model = new AuthenticatorConfigModel();
-    model.setConfig(config);
-    return model;
-  }
-
-  private void setUpContextAgain() {
-    HttpRequest request = mock(HttpRequest.class);
-    ClientConnection connection = mock(ClientConnection.class);
-    when(ctx.getFlowPath()).thenReturn("token"); // what ROPC sets; the form flow sets something else
-    when(ctx.getSession()).thenReturn(session);
-    when(ctx.getRealm()).thenReturn(realm);
-    when(ctx.getUser()).thenReturn(user);
-    when(ctx.getHttpRequest()).thenReturn(request);
-    when(ctx.getConnection()).thenReturn(connection);
-    when(ctx.getUriInfo()).thenReturn(mock(UriInfo.class));
-    when(ctx.getProtector()).thenReturn(protector);
-    when(ctx.getAuthenticatorConfig()).thenReturn(configModel());
-    when(request.getDecodedFormParameters()).thenReturn(form);
-    when(request.getHttpHeaders()).thenReturn(mock(HttpHeaders.class));
-    when(connection.getRemoteAddr()).thenReturn("203.0.113.7");
-  }
-
   @Test
   void askingForACodeIsNeverAFailedLogin() throws Exception {
     authenticator.authenticate(ctx);
@@ -388,8 +366,7 @@ class EmailOtpAuthenticatorTest {
   @Test
   void beingRateLimitedIsNeverAFailedLogin() throws Exception {
     authenticator.authenticate(ctx);
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
 
     authenticator.authenticate(ctx); // refused by the cooldown
 
@@ -405,12 +382,10 @@ class EmailOtpAuthenticatorTest {
         .when(email)
         .send(anyString(), anyList(), anyString(), anyMap());
 
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     authenticator.authenticate(ctx); // resend, and the send fails
 
-    reset(ctx);
-    setUpContextAgain();
+    nextRequest();
     form.putSingle("otp", code);
     authenticator.authenticate(ctx);
 

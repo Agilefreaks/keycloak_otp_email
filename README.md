@@ -82,7 +82,7 @@ code or being rate-limited never counts toward a lockout.
 | `codeLength` | `6` | — |
 | `codeTtlSeconds` | `300` | — (returned to a direct grant client as `otp_ttl`) |
 | `resendCooldownSeconds` | `60` | Hammering one address |
-| `maxAttempts` | `5` | Guessing. On the last wrong guess the code is burned; every wrong guess also calls `BruteForceProtector.failedLogin`. |
+| `maxAttempts` | `5` | Guessing. On the last wrong guess the code is burned; every wrong guess is reported as a credential failure, which is what feeds brute-force protection. |
 | `maxSendsPerEmailPerDay` | `5` | Using the endpoint to fill someone's inbox — the gap a cooldown alone leaves |
 | `maxSendsPerIpPerHour` | `10` | A single scripted source. Needs `proxy-headers` configured so the real client IP is visible. Keep it generous: carriers and offices share addresses. |
 | `maxSendsPerRealmPerHour` | `500` | A distributed flood, where every per-IP and per-address counter still looks innocent. Over budget the step answers `503 temporarily_unavailable`. This is what protects the SMTP quota and the sending reputation. |

@@ -10,9 +10,7 @@ public final class OtpCodes {
 
   private static final int SALT_BYTES = 16;
 
-  private OtpCodes() {
-    throw new UnsupportedOperationException("OtpCodes is a utility class");
-  }
+  private OtpCodes() {}
 
   public static String generate(int length) {
     return SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);

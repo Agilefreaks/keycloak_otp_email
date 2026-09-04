@@ -13,7 +13,6 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Function;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
@@ -45,9 +44,6 @@ import org.keycloak.util.JsonSerialization;
 public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactory {
 
   public static final String ID = "email-otp";
-
-  public static final String DEFAULT_EMAIL_TEMPLATE = "code-email.ftl";
-  public static final String DEFAULT_EMAIL_SUBJECT_KEY = "emailCodeSubject";
 
   static final String FLOW_PATH_TOKEN = "token";
 
@@ -88,18 +84,12 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     if (step == null) {
       return;
     }
-
-    if (step.directGrant) {
-      String submitted = step.form.getFirst(PARAM_OTP);
-      if (submitted == null || submitted.isBlank()) {
-        sendAndReport(step);
-      } else {
-        verifyAndReport(step, submitted.trim());
-      }
-      return;
+    String otp = step.directGrant() ? step.form().getFirst(PARAM_OTP) : null;
+    if (isBlank(otp)) {
+      sendCode(step);
+    } else {
+      verifyCode(step, otp.trim());
     }
-
-    sendAndReport(step);
   }
 
   /** Only reached from a form flow — direct grant never posts back. */
@@ -109,132 +99,109 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     if (step == null) {
       return;
     }
-
-    if (step.form.containsKey(FIELD_RESEND)) {
-      sendAndReport(step);
+    if (step.form().containsKey(FIELD_RESEND)) {
+      sendCode(step);
       return;
     }
-
-    String submitted = step.form.getFirst(FIELD_CODE);
-    if (submitted == null || submitted.isBlank()) {
-      challenge(step, new FormMessage(FIELD_CODE, MSG_INVALID), false);
-      return;
+    String code = step.form().getFirst(FIELD_CODE);
+    if (isBlank(code)) {
+      challenge(step, new FormMessage(FIELD_CODE, MSG_INVALID));
+    } else {
+      verifyCode(step, code.trim());
     }
-    verifyAndReport(step, submitted.trim());
   }
 
+  private record Step(
+      AuthenticationFlowContext context,
+      UserModel user,
+      OtpConfig config,
+      OtpStore store,
+      MultivaluedMap<String, String> form,
+      boolean directGrant) {
+
+    String key() {
+      return OtpKeys.code(user.getId());
+    }
+  }
+
+  /** Null when the flow carries no user with an email address; the failure is already reported. */
   private Step open(AuthenticationFlowContext context) {
     UserModel user = context.getUser();
-    if (user != null && user.getEmail() != null && !user.getEmail().isBlank()) {
-      return new Step(context, user, OtpConfig.from(context.getAuthenticatorConfig()));
+    boolean directGrant = FLOW_PATH_TOKEN.equals(context.getFlowPath());
+    if (user == null || isBlank(user.getEmail())) {
+      LOG.warnf(
+          "No email address for the user on this flow; cannot send a code (user=%s)",
+          user == null ? "none" : user.getId());
+      // A JSON body here would land on a web page in a form flow.
+      if (directGrant) {
+        context.failure(
+            AuthenticationFlowError.INVALID_USER,
+            JsonResponses.error(
+                400, JsonResponses.ERROR_INVALID_REQUEST, "Missing parameter: username"));
+      } else {
+        context.failure(AuthenticationFlowError.INVALID_USER);
+      }
+      return null;
     }
-
-    // A JSON body here would land on a web page in a form flow.
-    LOG.warnf(
-        "No email address for the user on this flow; cannot send a code (user=%s)",
-        user == null ? "none" : user.getId());
-    if (FLOW_PATH_TOKEN.equals(context.getFlowPath())) {
-      context.failure(
-          AuthenticationFlowError.INVALID_USER,
-          JsonResponses.error(
-              400, JsonResponses.ERROR_INVALID_REQUEST, "Missing parameter: username"));
-    } else {
-      context.failure(AuthenticationFlowError.INVALID_USER);
-    }
-    return null;
+    return new Step(
+        context,
+        user,
+        OtpConfig.from(context.getAuthenticatorConfig()),
+        storeFactory.apply(context.getSession()),
+        context.getHttpRequest().getDecodedFormParameters(),
+        directGrant);
   }
 
-  private final class Step {
-    final AuthenticationFlowContext context;
-    final UserModel user;
-    final OtpConfig config;
-    final OtpStore store;
-    final String key;
-    final MultivaluedMap<String, String> form;
-    final boolean directGrant;
-
-    Step(AuthenticationFlowContext context, UserModel user, OtpConfig config) {
-      this.context = context;
-      this.user = user;
-      this.config = config;
-      this.store = storeFactory.apply(context.getSession());
-      this.key = OtpKeys.code(user.getId());
-      this.form = context.getHttpRequest().getDecodedFormParameters();
-      this.directGrant = FLOW_PATH_TOKEN.equals(context.getFlowPath());
-    }
-  }
-
-  private enum SendResult {
-    SENT,
-    THROTTLED,
-    BUDGET_EXHAUSTED,
-    ATTESTATION_MISSING,
-    MAIL_FAILED
-  }
-
-  private void sendAndReport(Step step) {
-    long[] retryAfter = new long[1];
-    SendResult result = deliverCode(step, retryAfter);
-
-    if (step.directGrant) {
-      Response response =
-          switch (result) {
-            case SENT ->
-                JsonResponses.otpRequired(step.user.getEmail(), step.config.codeTtlSeconds());
-            case THROTTLED -> JsonResponses.throttled(retryAfter[0]);
-            case BUDGET_EXHAUSTED ->
-                JsonResponses.temporarilyUnavailable("code sending is temporarily unavailable");
-            case ATTESTATION_MISSING ->
-                JsonResponses.error(
-                    400, JsonResponses.ERROR_INVALID_REQUEST, "Missing or invalid app attestation");
-            case MAIL_FAILED -> JsonResponses.temporarilyUnavailable("could not send the code");
-          };
-      step.context.forceChallenge(response);
-      return;
-    }
-
-    switch (result) {
-      case SENT -> challenge(step, null, false);
-      case THROTTLED ->
-          challenge(step, new FormMessage(FIELD_CODE, MSG_RESEND_COOLDOWN, retryAfter[0]), false);
-      case BUDGET_EXHAUSTED, MAIL_FAILED, ATTESTATION_MISSING ->
-          challenge(step, new FormMessage(FIELD_CODE, MSG_SEND_FAILED), false);
-    }
-  }
-
-  private SendResult deliverCode(Step step, long[] retryAfter) {
+  /**
+   * Every outcome here goes out as a challenge, never a failure: {@code DefaultAuthenticationFlow}
+   * calls {@code AuthenticationProcessor.logFailure()} for both {@code FAILED} and {@code
+   * FAILURE_CHALLENGE}, which feeds the brute-force protector, and a cooldown, a send failure or a
+   * request for a code is not a wrong credential. Reporting them as one locks users out.
+   */
+  private void sendCode(Step step) {
+    OtpConfig config = step.config();
     if (!attestationAccepted(step)) {
       LOG.warnf(
-          "Rejected a code request without a valid attestation token for '%s'", step.user.getId());
-      return SendResult.ATTESTATION_MISSING;
+          "Rejected a code request without a valid attestation token for '%s'",
+          step.user().getId());
+      if (step.directGrant()) {
+        step.context()
+            .forceChallenge(
+                JsonResponses.error(
+                    400, JsonResponses.ERROR_INVALID_REQUEST, "Missing or invalid app attestation"));
+      } else {
+        challenge(step, new FormMessage(FIELD_CODE, MSG_SEND_FAILED));
+      }
+      return;
     }
 
     long now = clock.instant().getEpochSecond();
-    Optional<OtpRecord> pending = step.store.get(step.key).flatMap(OtpRecord::fromNotes);
-    if (step.config.resendCooldownSeconds() > 0 && pending.isPresent()) {
-      long elapsed = now - pending.get().sentAtEpochSeconds();
-      if (elapsed < step.config.resendCooldownSeconds()) {
-        retryAfter[0] = step.config.resendCooldownSeconds() - elapsed;
-        return SendResult.THROTTLED;
+    OtpRecord pending = step.store().get(step.key()).flatMap(OtpRecord::fromNotes).orElse(null);
+    if (pending != null && config.resendCooldownSeconds() > 0) {
+      long remaining = config.resendCooldownSeconds() - (now - pending.sentAtEpochSeconds());
+      if (remaining > 0) {
+        refuseThrottled(step, remaining);
+        return;
       }
     }
 
-    RealmModel realm = step.context.getRealm();
+    RealmModel realm = step.context().getRealm();
     OtpRateGate.Decision decision =
-        new OtpRateGate(step.store, clock, step.config)
-            .reserve(realm.getId(), step.user.getEmail(), remoteAddress(step.context));
+        new OtpRateGate(step.store(), clock, config)
+            .reserve(realm.getId(), step.user().getEmail(), remoteAddress(step.context()));
+    if (decision.outcome() == OtpRateGate.Outcome.BUDGET_EXHAUSTED) {
+      LOG.warnf(
+          "Realm '%s' has spent its hourly OTP budget; refusing to send more codes",
+          realm.getName());
+      refuseUnavailable(step, "code sending is temporarily unavailable");
+      return;
+    }
     if (!decision.allowed()) {
-      if (decision.outcome() == OtpRateGate.Outcome.BUDGET_EXHAUSTED) {
-        LOG.warnf(
-            "Realm '%s' has spent its hourly OTP budget; refusing to send more codes",
-            realm.getName());
-        return SendResult.BUDGET_EXHAUSTED;
-      }
-      retryAfter[0] = decision.retryAfterSeconds();
-      return SendResult.THROTTLED;
+      refuseThrottled(step, decision.retryAfterSeconds());
+      return;
     }
 
-    String code = OtpCodes.generate(step.config.codeLength());
+    String code = OtpCodes.generate(config.codeLength());
     String salt = OtpCodes.newSalt();
 
     // Mail first, store second: a failed send must not replace a code the user already holds, and
@@ -242,137 +209,146 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     try {
       mail(step, code);
     } catch (EmailException | RuntimeException e) {
-      LOG.warnf(e, "Could not mail a code to '%s'", step.user.getEmail());
-      return SendResult.MAIL_FAILED;
+      LOG.warnf(e, "Could not mail a code to '%s'", step.user().getEmail());
+      refuseUnavailable(step, "could not send the code");
+      return;
     }
+    step.store()
+        .put(
+            step.key(),
+            new OtpRecord(OtpCodes.hash(salt, code), salt, 0, now).toNotes(),
+            config.codeTtlSeconds());
 
-    step.store.put(
-        step.key,
-        new OtpRecord(OtpCodes.hash(salt, code), salt, 0, now).toNotes(),
-        step.config.codeTtlSeconds());
-    return SendResult.SENT;
+    if (step.directGrant()) {
+      step.context()
+          .forceChallenge(
+              JsonResponses.otpRequired(step.user().getEmail(), config.codeTtlSeconds()));
+    } else {
+      challenge(step, null);
+    }
+  }
+
+  private void refuseThrottled(Step step, long retryAfterSeconds) {
+    if (step.directGrant()) {
+      step.context().forceChallenge(JsonResponses.throttled(retryAfterSeconds));
+    } else {
+      challenge(step, new FormMessage(FIELD_CODE, MSG_RESEND_COOLDOWN, retryAfterSeconds));
+    }
+  }
+
+  private void refuseUnavailable(Step step, String description) {
+    if (step.directGrant()) {
+      step.context().forceChallenge(JsonResponses.temporarilyUnavailable(description));
+    } else {
+      challenge(step, new FormMessage(FIELD_CODE, MSG_SEND_FAILED));
+    }
   }
 
   private void mail(Step step, String code) throws EmailException {
+    // Must stay mutable: EmailTemplateProvider adds its own entries to the map.
     Map<String, Object> attributes = new HashMap<>();
     attributes.put("code", code);
-    attributes.put("ttl", step.config.codeTtlSeconds());
-    attributes.put("username", step.user.getEmail());
-    attributes.put("realmName", step.context.getRealm().getName());
+    attributes.put("ttl", step.config().codeTtlSeconds());
+    attributes.put("username", step.user().getEmail());
+    attributes.put("realmName", step.context().getRealm().getName());
 
-    step.context
+    step.context()
         .getSession()
         .getProvider(EmailTemplateProvider.class)
-        .setRealm(step.context.getRealm())
-        .setUser(step.user)
-        .send(step.config.emailSubjectKey(), List.of(), step.config.emailTemplate(), attributes);
+        .setRealm(step.context().getRealm())
+        .setUser(step.user())
+        .send(
+            step.config().emailSubjectKey(), List.of(), step.config().emailTemplate(), attributes);
   }
 
-  private enum VerifyResult {
-    OK,
-    NO_CODE,
-    TOO_MANY_ATTEMPTS,
-    INVALID
+  private enum Rejection {
+    NO_CODE(AuthenticationFlowError.EXPIRED_CODE, "Code expired or not requested", MSG_EXPIRED),
+    TOO_MANY_ATTEMPTS(
+        AuthenticationFlowError.INVALID_CREDENTIALS, "Too many attempts", MSG_TOO_MANY_ATTEMPTS),
+    INVALID(AuthenticationFlowError.INVALID_CREDENTIALS, "Invalid code", MSG_INVALID);
+
+    final AuthenticationFlowError error;
+    final String description;
+    final String messageKey;
+
+    Rejection(AuthenticationFlowError error, String description, String messageKey) {
+      this.error = error;
+      this.description = description;
+      this.messageKey = messageKey;
+    }
   }
 
-  private void verifyAndReport(Step step, String submitted) {
-    VerifyResult result = checkCode(step, submitted);
-
-    if (result == VerifyResult.OK) {
-      step.context.success();
+  /** A wrong code is a credential failure and is reported as one; see {@link #sendCode}. */
+  private void verifyCode(Step step, String submitted) {
+    Rejection rejection = checkCode(step, submitted);
+    if (rejection == null) {
+      step.context().success();
       return;
     }
-
-    if (step.directGrant) {
-      String description =
-          switch (result) {
-            case NO_CODE -> "Code expired or not requested";
-            case TOO_MANY_ATTEMPTS -> "Too many attempts";
-            default -> "Invalid code";
-          };
-      AuthenticationFlowError error =
-          result == VerifyResult.NO_CODE
-              ? AuthenticationFlowError.EXPIRED_CODE
-              : AuthenticationFlowError.INVALID_CREDENTIALS;
-      step.context.failure(
-          error, JsonResponses.error(400, JsonResponses.ERROR_INVALID_GRANT, description));
+    if (step.directGrant()) {
+      step.context()
+          .failure(
+              rejection.error,
+              JsonResponses.error(400, JsonResponses.ERROR_INVALID_GRANT, rejection.description));
       return;
     }
-
-    String message =
-        switch (result) {
-          case NO_CODE -> MSG_EXPIRED;
-          case TOO_MANY_ATTEMPTS -> MSG_TOO_MANY_ATTEMPTS;
-          default -> MSG_INVALID;
-        };
-    boolean burned = result != VerifyResult.NO_CODE && step.store.get(step.key).isEmpty();
-    boolean credentialRejected = result != VerifyResult.NO_CODE;
-    challenge(step, new FormMessage(FIELD_CODE, message), burned, credentialRejected);
+    Response form =
+        codeForm(
+            step,
+            new FormMessage(FIELD_CODE, rejection.messageKey),
+            rejection == Rejection.TOO_MANY_ATTEMPTS);
+    if (rejection == Rejection.NO_CODE) {
+      step.context().challenge(form);
+    } else {
+      step.context().failureChallenge(rejection.error, form);
+    }
   }
 
-  private VerifyResult checkCode(Step step, String submitted) {
-    Optional<OtpRecord> stored = step.store.get(step.key).flatMap(OtpRecord::fromNotes);
-    if (stored.isEmpty()) {
-      return VerifyResult.NO_CODE;
+  /** Null when the code matched. */
+  private Rejection checkCode(Step step, String submitted) {
+    OtpRecord record = step.store().get(step.key()).flatMap(OtpRecord::fromNotes).orElse(null);
+    if (record == null) {
+      return Rejection.NO_CODE;
     }
-
-    OtpRecord record = stored.get();
+    int maxAttempts = step.config().maxAttempts();
     // Only reachable if maxAttempts was lowered while a code was already pending.
-    if (step.config.maxAttempts() > 0 && record.attempts() >= step.config.maxAttempts()) {
-      step.store.remove(step.key);
-      return VerifyResult.TOO_MANY_ATTEMPTS;
+    if (record.exhausted(maxAttempts)) {
+      step.store().remove(step.key());
+      return Rejection.TOO_MANY_ATTEMPTS;
+    }
+    if (OtpCodes.matches(record.salt(), record.hash(), submitted)) {
+      step.store().remove(step.key());
+      return null;
     }
 
-    if (!OtpCodes.matches(record.salt(), record.hash(), submitted)) {
-      OtpRecord bumped = record.withAttempt();
-      boolean burned = step.config.maxAttempts() > 0 && bumped.attempts() >= step.config.maxAttempts();
-      if (burned) {
-        step.store.remove(step.key);
-      } else {
-        // Re-stored with what is left of the original lifetime, never a fresh one.
-        step.store.put(step.key, bumped.toNotes(), remainingTtl(record, step.config));
-      }
-      // No failedLogin() call: reporting a credential failure already feeds the protector, and
-      // counting it twice halved the effective failureFactor.
-      return burned ? VerifyResult.TOO_MANY_ATTEMPTS : VerifyResult.INVALID;
+    OtpRecord bumped = record.withAttempt();
+    if (bumped.exhausted(maxAttempts)) {
+      step.store().remove(step.key());
+      return Rejection.TOO_MANY_ATTEMPTS;
     }
-
-    step.store.remove(step.key);
-    return VerifyResult.OK;
+    // Re-stored with what is left of the original lifetime, never a fresh one. No failedLogin()
+    // call either: reporting the credential failure already feeds the protector, and counting it
+    // twice halved the effective failureFactor.
+    long elapsed = clock.instant().getEpochSecond() - record.sentAtEpochSeconds();
+    step.store()
+        .put(step.key(), bumped.toNotes(), Math.max(step.config().codeTtlSeconds() - elapsed, 1));
+    return Rejection.INVALID;
   }
 
-  /**
-   * {@code DefaultAuthenticationFlow} calls {@code AuthenticationProcessor.logFailure()} for both
-   * {@code FAILED} and {@code FAILURE_CHALLENGE}, which feeds the brute-force protector. Only a
-   * code that was actually wrong may be reported that way: reporting a cooldown, a send failure or
-   * a request for a code as a failure locks users out of ordinary use.
-   */
-  private void challenge(
-      Step step, FormMessage error, boolean maxAttemptsReached, boolean credentialRejected) {
+  private void challenge(Step step, FormMessage error) {
+    step.context().challenge(codeForm(step, error, false));
+  }
+
+  private Response codeForm(Step step, FormMessage error, boolean maxAttemptsReached) {
     LoginFormsProvider form =
-        step.context
+        step.context()
             .form()
-            .setAttribute(ATTR_CODE_LENGTH, step.config.codeLength())
+            .setAttribute(ATTR_CODE_LENGTH, step.config().codeLength())
             .setAttribute(ATTR_MAX_ATTEMPTS_REACHED, maxAttemptsReached);
     if (error != null) {
-      form = form.setErrors(List.of(error));
+      form.setErrors(List.of(error));
     }
-
-    Response response = form.createForm(CODE_FORM_TEMPLATE);
-    if (credentialRejected) {
-      step.context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, response);
-    } else {
-      step.context.challenge(response);
-    }
-  }
-
-  private void challenge(Step step, FormMessage error, boolean maxAttemptsReached) {
-    challenge(step, error, maxAttemptsReached, false);
-  }
-
-  private long remainingTtl(OtpRecord record, OtpConfig config) {
-    long elapsed = clock.instant().getEpochSecond() - record.sentAtEpochSeconds();
-    return Math.max(config.codeTtlSeconds() - elapsed, 1);
+    return form.createForm(CODE_FORM_TEMPLATE);
   }
 
   private static String remoteAddress(AuthenticationFlowContext context) {
@@ -380,20 +356,21 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     return connection == null ? null : connection.getRemoteAddr();
   }
 
+  private static boolean isBlank(String value) {
+    return value == null || value.isBlank();
+  }
+
   private boolean attestationAccepted(Step step) {
-    if (step.config.startTokenHeader().isEmpty()) {
+    String header = step.config().startTokenHeader();
+    if (header.isEmpty()) {
       return true;
     }
-    String token =
-        step.context
-            .getHttpRequest()
-            .getHttpHeaders()
-            .getHeaderString(step.config.startTokenHeader());
-    if (token == null || token.isBlank()) {
+    String token = step.context().getHttpRequest().getHttpHeaders().getHeaderString(header);
+    if (isBlank(token)) {
       return false;
     }
-    return step.config.startTokenVerifyUrl().isEmpty()
-        || verifyAttestationToken(step.config.startTokenVerifyUrl(), token);
+    String verifyUrl = step.config().startTokenVerifyUrl();
+    return verifyUrl.isEmpty() || verifyAttestationToken(verifyUrl, token);
   }
 
   /** Overridable in tests. */
@@ -439,8 +416,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   }
 
   @Override
-  public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-  }
+  public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
 
   @Override
   public Authenticator create(KeycloakSession session) {
@@ -448,16 +424,13 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   }
 
   @Override
-  public void init(Config.Scope config) {
-  }
+  public void init(Config.Scope config) {}
 
   @Override
-  public void postInit(KeycloakSessionFactory factory) {
-  }
+  public void postInit(KeycloakSessionFactory factory) {}
 
   @Override
-  public void close() {
-  }
+  public void close() {}
 
   @Override
   public String getId() {
@@ -499,62 +472,62 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   @Override
   public List<ProviderConfigProperty> getConfigProperties() {
     return List.of(
-        text(
+        property(
             OtpConfig.CONFIG_CODE_LENGTH,
             "Code length",
             "Number of digits in the emailed code.",
-            String.valueOf(OtpConfig.DEFAULT_CODE_LENGTH)),
-        text(
+            OtpConfig.DEFAULT_CODE_LENGTH),
+        property(
             OtpConfig.CONFIG_CODE_TTL_SECONDS,
             "Code TTL (seconds)",
             "How long a code stays valid. Direct grant returns it to the app as 'otp_ttl'.",
-            String.valueOf(OtpConfig.DEFAULT_CODE_TTL_SECONDS)),
-        text(
+            OtpConfig.DEFAULT_CODE_TTL_SECONDS),
+        property(
             OtpConfig.CONFIG_RESEND_COOLDOWN_SECONDS,
             "Resend cooldown (seconds)",
             "Minimum gap between two codes for one address. 0 disables the cooldown.",
-            String.valueOf(OtpConfig.DEFAULT_RESEND_COOLDOWN_SECONDS)),
-        text(
+            OtpConfig.DEFAULT_RESEND_COOLDOWN_SECONDS),
+        property(
             OtpConfig.CONFIG_MAX_ATTEMPTS,
             "Max verification attempts",
             "Wrong guesses allowed before the code is burned. 0 disables the cap.",
-            String.valueOf(OtpConfig.DEFAULT_MAX_ATTEMPTS)),
-        text(
+            OtpConfig.DEFAULT_MAX_ATTEMPTS),
+        property(
             OtpConfig.CONFIG_MAX_SENDS_PER_EMAIL_PER_DAY,
             "Max sends per email per day",
             "Caps how much mail one address can be made to receive. 0 disables the cap.",
-            String.valueOf(OtpConfig.DEFAULT_MAX_SENDS_PER_EMAIL_PER_DAY)),
-        text(
+            OtpConfig.DEFAULT_MAX_SENDS_PER_EMAIL_PER_DAY),
+        property(
             OtpConfig.CONFIG_MAX_SENDS_PER_IP_PER_HOUR,
             "Max sends per IP per hour",
             "Caps a single source. Requires proxy-headers to be configured, so the real client "
                 + "IP is visible. Keep it generous: carriers and shared networks put many users "
                 + "behind one address. 0 disables the cap.",
-            String.valueOf(OtpConfig.DEFAULT_MAX_SENDS_PER_IP_PER_HOUR)),
-        text(
+            OtpConfig.DEFAULT_MAX_SENDS_PER_IP_PER_HOUR),
+        property(
             OtpConfig.CONFIG_MAX_SENDS_PER_REALM_PER_HOUR,
             "Max sends per realm per hour",
             "Circuit breaker for a distributed flood, where every per-IP and per-address counter "
                 + "still looks innocent. Protects the mail provider quota and sending reputation. "
                 + "0 disables the budget.",
-            String.valueOf(OtpConfig.DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR)),
-        text(
+            OtpConfig.DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR),
+        property(
             OtpConfig.CONFIG_EMAIL_TEMPLATE,
             "Email template",
             "Freemarker template in the realm's email theme.",
-            DEFAULT_EMAIL_TEMPLATE),
-        text(
+            OtpConfig.DEFAULT_EMAIL_TEMPLATE),
+        property(
             OtpConfig.CONFIG_EMAIL_SUBJECT_KEY,
             "Email subject key",
             "Message key resolved against the email theme's message bundle.",
-            DEFAULT_EMAIL_SUBJECT_KEY),
-        text(
+            OtpConfig.DEFAULT_EMAIL_SUBJECT_KEY),
+        property(
             OtpConfig.CONFIG_START_TOKEN_HEADER,
             "App attestation header",
             "When set, a code is only sent if the request carries this header. Point it at an App "
                 + "Attest / Play Integrity / reCAPTCHA Enterprise token. Empty = no check.",
             ""),
-        text(
+        property(
             OtpConfig.CONFIG_START_TOKEN_VERIFY_URL,
             "App attestation verify URL",
             "Endpoint the attestation token is POSTed to as 'token'; a JSON body with "
@@ -562,9 +535,9 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
             ""));
   }
 
-  private static ProviderConfigProperty text(
-      String name, String label, String help, String defaultValue) {
+  private static ProviderConfigProperty property(
+      String name, String label, String help, Object defaultValue) {
     return new ProviderConfigProperty(
-        name, label, help, ProviderConfigProperty.STRING_TYPE, defaultValue);
+        name, label, help, ProviderConfigProperty.STRING_TYPE, String.valueOf(defaultValue));
   }
 }

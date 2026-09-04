@@ -43,8 +43,4 @@ class InMemoryOtpStore implements OtpStore {
   public void remove(String key) {
     entries.remove(key);
   }
-
-  int size() {
-    return entries.size();
-  }
 }

@@ -20,9 +20,7 @@ public final class JsonResponses {
   public static final String ERROR_INVALID_GRANT = "invalid_grant";
   public static final String ERROR_TEMPORARILY_UNAVAILABLE = "temporarily_unavailable";
 
-  private JsonResponses() {
-    throw new UnsupportedOperationException("JsonResponses is a utility class");
-  }
+  private JsonResponses() {}
 
   public static Response otpRequired(String email, int ttlSeconds) {
     Map<String, Object> body = new LinkedHashMap<>();

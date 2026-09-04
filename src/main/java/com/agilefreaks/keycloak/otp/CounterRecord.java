@@ -29,7 +29,7 @@ public record CounterRecord(int count, long windowStartEpochSeconds) {
           new CounterRecord(
               Integer.parseInt(notes.get(NOTE_COUNT)),
               Long.parseLong(notes.get(NOTE_WINDOW_START))));
-    } catch (NumberFormatException | NullPointerException e) {
+    } catch (NumberFormatException e) {
       return Optional.empty();
     }
   }
