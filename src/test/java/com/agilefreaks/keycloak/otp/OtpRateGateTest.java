@@ -88,7 +88,6 @@ class OtpRateGateTest {
       assertEquals(Outcome.ALLOW, gate.reserve(REALM, "user" + i + "@example.com", "10.0.0." + i).outcome());
     }
 
-    // Distributed flood: every per-address and per-IP counter still looks innocent.
     assertEquals(
         Outcome.BUDGET_EXHAUSTED,
         gate.reserve(REALM, "user99@example.com", "10.0.0.99").outcome());
@@ -127,7 +126,6 @@ class OtpRateGateTest {
     gate.reserve(REALM, EMAIL, IP);
     gate.reserve(REALM, EMAIL, IP); // refused on the address cap
 
-    // The realm budget must not have been charged for a send that never happened.
     assertEquals(Outcome.ALLOW, gate.reserve(REALM, "another@example.com", IP).outcome());
   }
 

@@ -8,12 +8,9 @@ import java.util.Map;
 import org.keycloak.util.JsonSerialization;
 
 /**
- * OAuth-shaped JSON error bodies.
- *
- * <p>Keycloak's own {@code errorResponse(status, error, description)} can only emit
- * {@code {error, error_description}}, and a client driving its own login screen needs two more
- * fields — {@code otp_ttl} to show a countdown, and {@code retry_after} to disable its resend
- * button — so these are built by hand.
+ * OAuth-shaped JSON error bodies. Built by hand because Keycloak's own
+ * {@code errorResponse(status, error, description)} cannot carry {@code otp_ttl} or
+ * {@code retry_after}.
  */
 public final class JsonResponses {
 
@@ -27,7 +24,6 @@ public final class JsonResponses {
     throw new UnsupportedOperationException("JsonResponses is a utility class");
   }
 
-  /** 400 with the code just mailed — the app's cue to show the code-entry screen. */
   public static Response otpRequired(String email, int ttlSeconds) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("error", ERROR_OTP_REQUIRED);
@@ -36,7 +32,6 @@ public final class JsonResponses {
     return json(Response.Status.BAD_REQUEST.getStatusCode(), body);
   }
 
-  /** 429 — a send was refused by a rate guard; no mail left the building. */
   public static Response throttled(long retryAfterSeconds) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("error", ERROR_OTP_THROTTLED);
@@ -45,7 +40,6 @@ public final class JsonResponses {
     return json(429, body);
   }
 
-  /** 503 — the realm's hourly budget is spent, or SMTP failed. */
   public static Response temporarilyUnavailable(String description) {
     return error(
         Response.Status.SERVICE_UNAVAILABLE.getStatusCode(),

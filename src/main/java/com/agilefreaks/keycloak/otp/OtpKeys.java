@@ -1,9 +1,6 @@
 package com.agilefreaks.keycloak.otp;
 
-/**
- * Keys into the single-use store. Email addresses are hashed rather than embedded, so the cache
- * holds no readable PII.
- */
+/** Keys into the single-use store. Addresses are hashed so the cache holds no readable PII. */
 public final class OtpKeys {
 
   private static final String PREFIX = "keycloak-otp-email:";

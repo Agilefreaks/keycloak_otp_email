@@ -95,13 +95,22 @@ class EmailOtpAuthenticatorTest {
     when(email.setUser(user)).thenReturn(email);
   }
 
-  private Response captureFailure() {
+  /** A non-credential outcome must arrive as a challenge, or it feeds the brute-force protector. */
+  private Response captureChallenge() {
     ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
-    verify(ctx).failure(any(AuthenticationFlowError.class), captor.capture());
+    verify(ctx).forceChallenge(captor.capture());
+    verify(ctx, never()).failure(any(AuthenticationFlowError.class), any());
+    verify(ctx, never()).failure(any(AuthenticationFlowError.class));
     return captor.getValue();
   }
 
-  /** Runs the send half and returns the code that was mailed. */
+  private Response captureFailure() {
+    ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
+    verify(ctx).failure(any(AuthenticationFlowError.class), captor.capture());
+    verify(ctx, never()).forceChallenge(any());
+    return captor.getValue();
+  }
+
   private String startAndReadMailedCode() throws EmailException {
     authenticator.authenticate(ctx);
 
@@ -128,7 +137,7 @@ class EmailOtpAuthenticatorTest {
 
     assertTrue(code.matches("\\d{6}"), "expected a 6 digit code, got " + code);
 
-    Response response = captureFailure();
+    Response response = captureChallenge();
     assertEquals(400, response.getStatus());
     Map<String, Object> body = TestJson.parse(response);
     assertEquals(JsonResponses.ERROR_OTP_REQUIRED, body.get("error"));
@@ -151,7 +160,7 @@ class EmailOtpAuthenticatorTest {
 
     authenticator.authenticate(ctx);
 
-    assertEquals(120, ((Number) TestJson.parse(captureFailure()).get("otp_ttl")).intValue());
+    assertEquals(120, ((Number) TestJson.parse(captureChallenge()).get("otp_ttl")).intValue());
   }
 
   @Test
@@ -164,7 +173,7 @@ class EmailOtpAuthenticatorTest {
     store.setNow(clock.epochSeconds());
     authenticator.authenticate(ctx);
 
-    Response response = captureFailure();
+    Response response = captureChallenge();
     assertEquals(429, response.getStatus());
     Map<String, Object> body = TestJson.parse(response);
     assertEquals(JsonResponses.ERROR_OTP_THROTTLED, body.get("error"));
@@ -197,7 +206,7 @@ class EmailOtpAuthenticatorTest {
     }
     authenticator.authenticate(ctx);
 
-    assertEquals(429, captureFailure().getStatus());
+    assertEquals(429, captureChallenge().getStatus());
     verify(email, times(2)).send(anyString(), anyList(), anyString(), anyMap());
   }
 
@@ -211,7 +220,7 @@ class EmailOtpAuthenticatorTest {
     setUpContextAgain();
     authenticator.authenticate(ctx);
 
-    Response response = captureFailure();
+    Response response = captureChallenge();
     assertEquals(503, response.getStatus());
     assertEquals(
         JsonResponses.ERROR_TEMPORARILY_UNAVAILABLE, TestJson.parse(response).get("error"));
@@ -226,11 +235,10 @@ class EmailOtpAuthenticatorTest {
 
     authenticator.authenticate(ctx);
 
-    Response response = captureFailure();
+    Response response = captureChallenge();
     assertEquals(503, response.getStatus());
     assertEquals(
         JsonResponses.ERROR_TEMPORARILY_UNAVAILABLE, TestJson.parse(response).get("error"));
-    // A code the user never received must not block the next attempt on the cooldown.
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
   }
 
@@ -240,7 +248,7 @@ class EmailOtpAuthenticatorTest {
 
     authenticator.authenticate(ctx);
 
-    assertEquals(400, captureFailure().getStatus());
+    assertEquals(400, captureChallenge().getStatus());
     verifyNoMailSent();
   }
 
@@ -287,9 +295,8 @@ class EmailOtpAuthenticatorTest {
     Response response = captureFailure();
     assertEquals(400, response.getStatus());
     assertEquals(JsonResponses.ERROR_INVALID_GRANT, TestJson.parse(response).get("error"));
-    verify(protector).failedLogin(eq(realm), eq(user), any(), any());
+    verify(protector, never()).failedLogin(any(), any(), any(), any());
     verify(ctx, never()).success();
-    // Still redeemable — one typo must not cost the user their code.
     assertTrue(store.get(OtpKeys.code(USER_ID)).isPresent());
   }
 
@@ -307,7 +314,6 @@ class EmailOtpAuthenticatorTest {
 
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
 
-    // Even the right code is worthless now.
     reset(ctx);
     setUpContextAgain();
     form.putSingle("otp", code);
@@ -351,7 +357,6 @@ class EmailOtpAuthenticatorTest {
     return model;
   }
 
-  /** Re-stubs the context after a {@code reset}, so one test can drive several token requests. */
   private void setUpContextAgain() {
     HttpRequest request = mock(HttpRequest.class);
     ClientConnection connection = mock(ClientConnection.class);
@@ -367,6 +372,49 @@ class EmailOtpAuthenticatorTest {
     when(request.getDecodedFormParameters()).thenReturn(form);
     when(request.getHttpHeaders()).thenReturn(mock(HttpHeaders.class));
     when(connection.getRemoteAddr()).thenReturn("203.0.113.7");
+  }
+
+  @Test
+  void askingForACodeIsNeverAFailedLogin() throws Exception {
+    authenticator.authenticate(ctx);
+
+    // Regression: context.failure here locked users out for requesting codes.
+    verify(ctx, never()).failure(any(AuthenticationFlowError.class), any());
+    verify(ctx, never()).failure(any(AuthenticationFlowError.class));
+    verify(ctx, never()).failureChallenge(any(), any());
+    verify(protector, never()).failedLogin(any(), any(), any(), any());
+  }
+
+  @Test
+  void beingRateLimitedIsNeverAFailedLogin() throws Exception {
+    authenticator.authenticate(ctx);
+    reset(ctx);
+    setUpContextAgain();
+
+    authenticator.authenticate(ctx); // refused by the cooldown
+
+    assertEquals(429, captureChallenge().getStatus());
+    verify(protector, never()).failedLogin(any(), any(), any(), any());
+  }
+
+  @Test
+  void aResendThatFailsToSendKeepsTheCodeTheUserAlreadyHas() throws Exception {
+    String code = startAndReadMailedCode();
+    config.put(OtpConfig.CONFIG_RESEND_COOLDOWN_SECONDS, "0");
+    doThrow(new EmailException("smtp down"))
+        .when(email)
+        .send(anyString(), anyList(), anyString(), anyMap());
+
+    reset(ctx);
+    setUpContextAgain();
+    authenticator.authenticate(ctx); // resend, and the send fails
+
+    reset(ctx);
+    setUpContextAgain();
+    form.putSingle("otp", code);
+    authenticator.authenticate(ctx);
+
+    verify(ctx).success();
   }
 
   @Test

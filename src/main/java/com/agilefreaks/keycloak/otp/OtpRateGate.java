@@ -5,16 +5,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The three send-rate guards in front of the mail: per email address per day, per client IP per
- * hour, and a realm-wide hourly budget.
- *
- * <p>The per-address cooldown is not here — it reads the pending code's own timestamp, which the
- * authenticator already holds. The realm budget is the one that matters under a distributed flood,
- * where every per-IP and per-address counter still looks innocent.
- *
- * <p>{@link #reserve} both checks and consumes: if it returns {@code ALLOW}, the counters have
- * already been incremented, so a send that later fails still costs budget. That is deliberate —
- * failing sends are exactly what an abuser produces.
+ * The send-rate guards: per address per day, per client IP per hour, and a realm-wide hourly
+ * budget. {@link #reserve} consumes as well as checks, so a send that later fails still costs
+ * budget — failing sends are what an abuser produces.
  */
 public class OtpRateGate {
 
@@ -96,7 +89,6 @@ public class OtpRateGate {
     BUDGET_EXHAUSTED
   }
 
-  /** {@code retryAfterSeconds} is meaningful only for {@link Outcome#THROTTLED}. */
   public record Decision(Outcome outcome, long retryAfterSeconds) {
 
     public static Decision allow() {

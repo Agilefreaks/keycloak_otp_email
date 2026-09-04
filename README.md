@@ -64,12 +64,18 @@ restarting the server drops codes in flight, and the user requests a new one.
 
 ## Rate limiting
 
-The first call is unauthenticated and sends mail, and **Keycloak's brute-force
-protection does not cover direct grant** — in 26.5 the only production caller of
-`BruteForceProtector.failedLogin` is `AuthenticationProcessor.logFailure()`,
-which runs on the browser path alone. So these limits are the guard, not a
-supplement to one. Each is `0` to disable, and each execution carries its own
-config, so a browser flow and a direct grant flow can be tuned independently.
+The first call is unauthenticated and sends mail, so it needs limits of its own:
+Keycloak's brute-force protection counts *rejected credentials*, and a request
+that has not offered a code yet is not one. Each is `0` to disable, and each
+execution carries its own config, so a browser flow and a direct grant flow can
+be tuned independently.
+
+These limits are separate from brute-force protection rather than a replacement
+for it. Both apply: this authenticator reports a wrong code as a credential
+failure, which is what feeds `BruteForceProtector` — `DefaultAuthenticationFlow`
+calls `AuthenticationProcessor.logFailure()` for `FAILED` and `FAILURE_CHALLENGE`
+alike, in either flow. Everything else it reports as a challenge, so requesting a
+code or being rate-limited never counts toward a lockout.
 
 | Config | Default | Stops |
 |---|---|---|

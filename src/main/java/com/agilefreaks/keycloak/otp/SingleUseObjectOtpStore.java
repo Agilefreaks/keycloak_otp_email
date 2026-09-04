@@ -4,10 +4,7 @@ import java.util.Map;
 import java.util.Optional;
 import org.keycloak.models.KeycloakSession;
 
-/**
- * {@link OtpStore} backed by Keycloak's single-use object store — the same cache action tokens use.
- * Entries expire on their own, so nothing has to be swept and nothing is left on the user record.
- */
+/** {@link OtpStore} backed by Keycloak's single-use object store. Entries expire on their own. */
 public class SingleUseObjectOtpStore implements OtpStore {
 
   private final KeycloakSession session;
@@ -23,9 +20,12 @@ public class SingleUseObjectOtpStore implements OtpStore {
 
   @Override
   public void put(String key, Map<String, String> notes, long ttlSeconds) {
-    // put() refuses to overwrite an existing key, so an update is a remove followed by a put; that
-    // also makes the lifespan explicit on every write instead of inheriting the original one.
-    session.singleUseObjects().remove(key);
+    // No remove first, deliberately: Infinispan defers put() to the transaction commit but
+    // applies remove() immediately, so removing would make the key read as absent to concurrent
+    // requests for the rest of this one. The deferred put overwrites on commit.
+    //
+    // Imposes one rule: never put the same key twice in a request — the transaction rejects a
+    // second task for a key it already holds.
     session.singleUseObjects().put(key, ttlSeconds, notes);
   }
 
