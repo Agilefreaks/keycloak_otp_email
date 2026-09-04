@@ -1,0 +1,16 @@
+# Build + test the jar locally without installing Maven/JDK:
+#
+#   docker compose run --rm build
+#
+# Runs the unit tests + coverage gate and produces target/keycloak-otp-email.jar.
+services:
+  build:
+    image: maven:3.9-eclipse-temurin-21
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - maven-cache:/root/.m2
+    command: mvn -B clean verify
+
+volumes:
+  maven-cache:
