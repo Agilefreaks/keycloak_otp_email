@@ -4,11 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
-/**
- * A pending code. Direct grant destroys its authentication session on every token request, so this
- * is the only thing linking the "send" call to the "verify" call — it lives in the single-use object
- * store, which holds opaque string maps.
- */
+/** A pending code, as the opaque string map the single-use object store holds. */
 public record OtpRecord(String hash, String salt, int attempts, long sentAtEpochSeconds) {
 
   static final String NOTE_HASH = "hash";

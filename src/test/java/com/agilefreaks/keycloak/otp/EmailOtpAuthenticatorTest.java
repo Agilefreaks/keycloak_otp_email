@@ -95,11 +95,7 @@ class EmailOtpAuthenticatorTest {
     when(email.setUser(user)).thenReturn(email);
   }
 
-  /**
-   * The response for an outcome that is not a rejected credential. It must arrive as a challenge:
-   * Keycloak's DefaultAuthenticationFlow calls logFailure() for FAILED and FAILURE_CHALLENGE, which
-   * feeds the brute-force protector, and asking for a code is not a failed login.
-   */
+  /** A non-credential outcome must arrive as a challenge, or it feeds the brute-force protector. */
   private Response captureChallenge() {
     ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
     verify(ctx).forceChallenge(captor.capture());
@@ -108,7 +104,6 @@ class EmailOtpAuthenticatorTest {
     return captor.getValue();
   }
 
-  /** The response for a code that was actually wrong — the one case that is a credential failure. */
   private Response captureFailure() {
     ArgumentCaptor<Response> captor = ArgumentCaptor.forClass(Response.class);
     verify(ctx).failure(any(AuthenticationFlowError.class), captor.capture());
@@ -116,7 +111,6 @@ class EmailOtpAuthenticatorTest {
     return captor.getValue();
   }
 
-  /** Runs the send half and returns the code that was mailed. */
   private String startAndReadMailedCode() throws EmailException {
     authenticator.authenticate(ctx);
 
@@ -245,8 +239,6 @@ class EmailOtpAuthenticatorTest {
     assertEquals(503, response.getStatus());
     assertEquals(
         JsonResponses.ERROR_TEMPORARILY_UNAVAILABLE, TestJson.parse(response).get("error"));
-    // Nothing was stored: the code is written only once the mail is away, so a failed send can
-    // neither block the next attempt on the cooldown nor replace a code the user already holds.
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
   }
 
@@ -303,11 +295,8 @@ class EmailOtpAuthenticatorTest {
     Response response = captureFailure();
     assertEquals(400, response.getStatus());
     assertEquals(JsonResponses.ERROR_INVALID_GRANT, TestJson.parse(response).get("error"));
-    // Deliberately no failedLogin() assertion: reporting a credential failure is what feeds the
-    // brute-force protector, and calling it here as well double-counted every wrong guess.
     verify(protector, never()).failedLogin(any(), any(), any(), any());
     verify(ctx, never()).success();
-    // Still redeemable — one typo must not cost the user their code.
     assertTrue(store.get(OtpKeys.code(USER_ID)).isPresent());
   }
 
@@ -325,7 +314,6 @@ class EmailOtpAuthenticatorTest {
 
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
 
-    // Even the right code is worthless now.
     reset(ctx);
     setUpContextAgain();
     form.putSingle("otp", code);
@@ -369,7 +357,6 @@ class EmailOtpAuthenticatorTest {
     return model;
   }
 
-  /** Re-stubs the context after a {@code reset}, so one test can drive several token requests. */
   private void setUpContextAgain() {
     HttpRequest request = mock(HttpRequest.class);
     ClientConnection connection = mock(ClientConnection.class);
@@ -391,8 +378,7 @@ class EmailOtpAuthenticatorTest {
   void askingForACodeIsNeverAFailedLogin() throws Exception {
     authenticator.authenticate(ctx);
 
-    // The bug this guards: reporting "code sent" with context.failure made every code request
-    // count against the realm's brute-force threshold, locking users out without a wrong code.
+    // Regression: context.failure here locked users out for requesting codes.
     verify(ctx, never()).failure(any(AuthenticationFlowError.class), any());
     verify(ctx, never()).failure(any(AuthenticationFlowError.class));
     verify(ctx, never()).failureChallenge(any(), any());

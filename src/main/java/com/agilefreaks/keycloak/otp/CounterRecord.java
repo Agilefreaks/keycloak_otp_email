@@ -5,8 +5,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * A fixed-window counter. The window start is stored rather than relying on the cache's own TTL, so
- * the guard behaves identically whether or not the backing store resets a lifespan on replace.
+ * A fixed-window counter. The window start is stored rather than inferred from the cache's TTL, so
+ * the guard behaves the same whether or not the backing store resets a lifespan on write.
  */
 public record CounterRecord(int count, long windowStartEpochSeconds) {
 

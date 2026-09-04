@@ -26,7 +26,6 @@ class OtpCodesTest {
       codes.add(OtpCodes.generate(6));
     }
 
-    // A generator stuck on one value would be a catastrophic, silent failure.
     assertTrue(codes.size() > 40, "expected varied codes, got " + codes.size() + " distinct");
   }
 

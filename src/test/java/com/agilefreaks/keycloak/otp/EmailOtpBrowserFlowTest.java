@@ -39,11 +39,7 @@ import org.keycloak.models.utils.FormMessage;
 import org.keycloak.services.managers.BruteForceProtector;
 import org.mockito.ArgumentCaptor;
 
-/**
- * The same authenticator driven through a form flow. It tells the two apart by
- * {@code getFlowPath()} — direct grant sets it to "token", so anything else renders the form
- * rather than leaking one into a token response.
- */
+/** The same authenticator driven through a form flow ({@code getFlowPath() != "token"}). */
 class EmailOtpBrowserFlowTest {
 
   private static final long NOW = 1_700_000_000L;
@@ -107,7 +103,6 @@ class EmailOtpBrowserFlowTest {
     when(form.createForm(anyString())).thenReturn(formResponse);
   }
 
-  /** Runs the first entry into the step and returns the code that was mailed. */
   private String enterAndReadMailedCode() throws EmailException {
     authenticator.authenticate(ctx);
 
@@ -124,7 +119,6 @@ class EmailOtpBrowserFlowTest {
     return String.valueOf(code);
   }
 
-  /** The most recent setErrors call, for tests that drive several posts. */
   private List<FormMessage> captureLastErrors() {
     @SuppressWarnings("unchecked")
     ArgumentCaptor<List<FormMessage>> captor = ArgumentCaptor.forClass(List.class);
@@ -146,7 +140,6 @@ class EmailOtpBrowserFlowTest {
     assertTrue(code.matches("\\d{6}"));
     verify(form).createForm(EmailOtpAuthenticator.CODE_FORM_TEMPLATE);
     verify(ctx).challenge(formResponse);
-    // The theme sizes its digit boxes from this.
     verify(form).setAttribute("codeLength", 6);
     verify(ctx, never()).success();
   }
@@ -180,12 +173,9 @@ class EmailOtpBrowserFlowTest {
 
     List<FormMessage> errors = captureErrors();
     assertEquals(1, errors.size());
-    // The theme reads messagesPerField.get('emailCode'), so the error must be field-scoped.
+    // The theme reads messagesPerField.get('emailCode').
     assertEquals(EmailOtpAuthenticator.FIELD_CODE, errors.get(0).getField());
     assertEquals(EmailOtpAuthenticator.MSG_INVALID, errors.get(0).getMessage());
-    // A wrong code is the one outcome that is a rejected credential, so it is the one that may
-    // reach failureChallenge — which is also what feeds the brute-force protector, so this
-    // authenticator must not call failedLogin() itself.
     verify(ctx).failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, formResponse);
     verify(protector, never()).failedLogin(any(), any(), any(), any());
     verify(ctx, never()).success();
@@ -202,9 +192,7 @@ class EmailOtpBrowserFlowTest {
     authenticator.action(ctx);
 
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
-    // The theme hides the Continue button and disables the inputs on this.
     verify(form).setAttribute("maxAttemptsReached", true);
-    // The guess that burns the code must say so, not "that code isn't right".
     assertEquals(EmailOtpAuthenticator.MSG_TOO_MANY_ATTEMPTS, captureLastErrors().get(0).getMessage());
   }
 
@@ -285,7 +273,7 @@ class EmailOtpBrowserFlowTest {
     formData.putSingle(EmailOtpAuthenticator.FIELD_RESEND, "");
     authenticator.action(ctx); // refused by the cooldown
 
-    // Reloading the code page inside the cooldown used to charge a brute-force strike each time.
+    // Regression: reloading inside the cooldown charged a brute-force strike each time.
     verify(ctx, never()).failureChallenge(any(), any());
     verify(ctx, never()).failure(any(AuthenticationFlowError.class), any());
     verify(protector, never()).failedLogin(any(), any(), any(), any());

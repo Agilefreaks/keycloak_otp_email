@@ -35,19 +35,12 @@ import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.util.JsonSerialization;
 
 /**
- * Emails a one-time code and verifies it — for the browser flow and for direct grant, from one
- * implementation.
+ * Emails a one-time code and verifies it, in a browser flow and in a direct grant flow.
  *
- * <p>The two differ only in how a step talks to its caller: a browser gets an HTML challenge and
- * posts back to {@link #action}, while a token request gets JSON and repeats the whole call with
- * the code. {@code getFlowPath()} tells them apart — the resource-owner password grant sets it to
- * {@code token}, and anything else is treated as a form flow, so an unexpected value renders a page
- * rather than leaking one into a token response.
- *
- * <p>The code lives in Keycloak's single-use object store rather than an auth-session note, because
- * direct grant builds and destroys its authentication session on every token request. The email
- * template and subject key are configuration, so the realm's own theme decides what the message
- * looks like.
+ * <p>Direct grant is recognised by {@code getFlowPath() == "token"}; anything else is treated as a
+ * form flow, so an unexpected value renders a page rather than leaking one into a token response.
+ * The code lives in the single-use object store rather than an auth-session note because direct
+ * grant destroys its authentication session between the two calls.
  */
 public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactory {
 
@@ -56,7 +49,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   public static final String DEFAULT_EMAIL_TEMPLATE = "code-email.ftl";
   public static final String DEFAULT_EMAIL_SUBJECT_KEY = "emailCodeSubject";
 
-  /** Flow path the resource-owner password grant runs under. Everything else renders a form. */
   static final String FLOW_PATH_TOKEN = "token";
 
   static final String CODE_FORM_TEMPLATE = "email-code-form.ftl";
@@ -90,8 +82,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     this.clock = clock;
   }
 
-  // ------------------------------------------------------------------ entry points
-
   @Override
   public void authenticate(AuthenticationFlowContext context) {
     Step step = open(context);
@@ -109,7 +99,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       return;
     }
 
-    // A browser lands here on first entry into the step: mail a code, then ask for it.
     sendAndReport(step);
   }
 
@@ -134,15 +123,13 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     verifyAndReport(step, submitted.trim());
   }
 
-  /** Gathers what every branch needs, or fails the flow and returns null. */
   private Step open(AuthenticationFlowContext context) {
     UserModel user = context.getUser();
     if (user != null && user.getEmail() != null && !user.getEmail().isBlank()) {
       return new Step(context, user, OtpConfig.from(context.getAuthenticatorConfig()));
     }
 
-    // Nothing to mail to. A federated user with no mail attribute can reach this in a browser
-    // flow, and answering that with a JSON body would put a token-endpoint payload on a web page.
+    // A JSON body here would land on a web page in a form flow.
     LOG.warnf(
         "No email address for the user on this flow; cannot send a code (user=%s)",
         user == null ? "none" : user.getId());
@@ -157,7 +144,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     return null;
   }
 
-  /** Everything one invocation needs, resolved once. */
   private final class Step {
     final AuthenticationFlowContext context;
     final UserModel user;
@@ -178,8 +164,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     }
   }
 
-  // ------------------------------------------------------------------ sending
-
   private enum SendResult {
     SENT,
     THROTTLED,
@@ -188,17 +172,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     MAIL_FAILED
   }
 
-  /**
-   * Runs the send, then renders the outcome the way this flow expects.
-   *
-   * <p>Every outcome here is a challenge, never a failure: asking for a code, refusing to send
-   * another one yet and failing to reach the mail server are all things that happen before any
-   * credential has been offered. Reporting them with {@code context.failure} would be wrong twice
-   * over — {@code DefaultAuthenticationFlow} answers both {@code FAILED} and
-   * {@code FAILURE_CHALLENGE} by calling {@code AuthenticationProcessor.logFailure()}, so a realm
-   * with brute-force protection on would count each of these against the user and lock them out for
-   * simply requesting codes.
-   */
   private void sendAndReport(Step step) {
     long[] retryAfter = new long[1];
     SendResult result = deliverCode(step, retryAfter);
@@ -216,8 +189,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
                     400, JsonResponses.ERROR_INVALID_REQUEST, "Missing or invalid app attestation");
             case MAIL_FAILED -> JsonResponses.temporarilyUnavailable("could not send the code");
           };
-      // forceChallenge, not challenge: the flow must stop here even though this execution is
-      // REQUIRED and has produced no user credential yet.
       step.context.forceChallenge(response);
       return;
     }
@@ -226,13 +197,11 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       case SENT -> challenge(step, null, false);
       case THROTTLED ->
           challenge(step, new FormMessage(FIELD_CODE, MSG_RESEND_COOLDOWN, retryAfter[0]), false);
-      // None of these are actionable by the user, so they all read as "we couldn't send it".
       case BUDGET_EXHAUSTED, MAIL_FAILED, ATTESTATION_MISSING ->
           challenge(step, new FormMessage(FIELD_CODE, MSG_SEND_FAILED), false);
     }
   }
 
-  /** Mints, stores and mails a code, subject to the send guards. */
   private SendResult deliverCode(Step step, long[] retryAfter) {
     if (!attestationAccepted(step)) {
       LOG.warnf(
@@ -268,10 +237,8 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     String code = OtpCodes.generate(step.config.codeLength());
     String salt = OtpCodes.newSalt();
 
-    // Mail first, store second. A code the user never received must not replace the one they may
-    // already hold, nor sit there blocking the next send on the cooldown — and it cannot be undone
-    // after the fact, because the store applies writes when the request commits while its remove
-    // takes effect immediately.
+    // Mail first, store second: a failed send must not replace a code the user already holds, and
+    // it cannot be undone afterwards (see SingleUseObjectOtpStore#put).
     try {
       mail(step, code);
     } catch (EmailException | RuntimeException e) {
@@ -286,7 +253,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     return SendResult.SENT;
   }
 
-  /** Sends through the configured template — the same one both flows use. */
   private void mail(Step step, String code) throws EmailException {
     Map<String, Object> attributes = new HashMap<>();
     attributes.put("code", code);
@@ -301,8 +267,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         .setUser(step.user)
         .send(step.config.emailSubjectKey(), List.of(), step.config.emailTemplate(), attributes);
   }
-
-  // ------------------------------------------------------------------ verifying
 
   private enum VerifyResult {
     OK,
@@ -341,9 +305,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
           case TOO_MANY_ATTEMPTS -> MSG_TOO_MANY_ATTEMPTS;
           default -> MSG_INVALID;
         };
-    // A wrong guess can be the one that burns the code, so ask the store rather than the result.
     boolean burned = result != VerifyResult.NO_CODE && step.store.get(step.key).isEmpty();
-    // A submitted code that did not match is a rejected credential; a missing or expired one is not.
     boolean credentialRejected = result != VerifyResult.NO_CODE;
     challenge(step, new FormMessage(FIELD_CODE, message), burned, credentialRejected);
   }
@@ -370,11 +332,8 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         // Re-stored with what is left of the original lifetime, never a fresh one.
         step.store.put(step.key, bumped.toNotes(), remainingTtl(record, step.config));
       }
-      // No failedLogin() call here: reporting this as a credential failure is enough. Keycloak's
-      // DefaultAuthenticationFlow calls AuthenticationProcessor.logFailure() for FAILED and
-      // FAILURE_CHALLENGE alike, which feeds the brute-force protector for us — in both flows.
-      // Counting it again here locked users out at half the configured failureFactor.
-      // Say why the form just went dead, rather than "that code isn't right".
+      // No failedLogin() call: reporting a credential failure already feeds the protector, and
+      // counting it twice halved the effective failureFactor.
       return burned ? VerifyResult.TOO_MANY_ATTEMPTS : VerifyResult.INVALID;
     }
 
@@ -382,15 +341,11 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     return VerifyResult.OK;
   }
 
-  // ------------------------------------------------------------------ form rendering
-
   /**
-   * Renders the code form, with a field-scoped error when there is one.
-   *
-   * <p>{@code failureChallenge} is reserved for a code that was actually wrong. Everything else —
-   * a cooldown, a send failure, an empty submission — goes out as a plain challenge, because
-   * {@code DefaultAuthenticationFlow} calls {@code logFailure()} on {@code FAILURE_CHALLENGE} too,
-   * and none of those are a failed credential.
+   * {@code DefaultAuthenticationFlow} calls {@code AuthenticationProcessor.logFailure()} for both
+   * {@code FAILED} and {@code FAILURE_CHALLENGE}, which feeds the brute-force protector. Only a
+   * code that was actually wrong may be reported that way: reporting a cooldown, a send failure or
+   * a request for a code as a failure locks users out of ordinary use.
    */
   private void challenge(
       Step step, FormMessage error, boolean maxAttemptsReached, boolean credentialRejected) {
@@ -414,8 +369,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   private void challenge(Step step, FormMessage error, boolean maxAttemptsReached) {
     challenge(step, error, maxAttemptsReached, false);
   }
-
-  // ------------------------------------------------------------------ helpers
 
   private long remainingTtl(OtpRecord record, OtpConfig config) {
     long elapsed = clock.instant().getEpochSecond() - record.sentAtEpochSeconds();
@@ -443,10 +396,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         || verifyAttestationToken(step.config.startTokenVerifyUrl(), token);
   }
 
-  /**
-   * POSTs the attestation token for verification. Mirrors the browser CAPTCHA step: an explicit
-   * rejection blocks the send, an unreachable verifier does not (overridable in tests).
-   */
+  /** Overridable in tests. */
   boolean verifyAttestationToken(String verifyUrl, String token) {
     HttpRequest request;
     try {
@@ -459,8 +409,8 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
                       "token=" + URLEncoder.encode(token, StandardCharsets.UTF_8)))
               .build();
     } catch (IllegalArgumentException e) {
-      // An unusable URL never becomes usable, so failing open here would quietly downgrade the
-      // check to "the header is present" for every request from now on.
+      // A URL that cannot be parsed will never work: failing open would disable the check for
+      // good, so this one fails closed.
       LOG.errorf(e, "Attestation verify URL '%s' is not usable; rejecting the send", verifyUrl);
       return false;
     }
@@ -473,13 +423,10 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       }
       return JsonSerialization.mapper.readTree(response.body()).path("success").asBoolean(false);
     } catch (Exception e) {
-      // A verifier that is merely unreachable must not lock everyone out.
       LOG.warnf(e, "Attestation verification call failed; allowing the send");
       return true;
     }
   }
-
-  // ------------------------------------------------------------------ SPI plumbing
 
   @Override
   public boolean requiresUser() {
@@ -493,7 +440,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
 
   @Override
   public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-    // no-op
   }
 
   @Override
@@ -503,17 +449,14 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
 
   @Override
   public void init(Config.Scope config) {
-    // no-op
   }
 
   @Override
   public void postInit(KeycloakSessionFactory factory) {
-    // no-op
   }
 
   @Override
   public void close() {
-    // no-op
   }
 
   @Override

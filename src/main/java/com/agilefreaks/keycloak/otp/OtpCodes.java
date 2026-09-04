@@ -6,7 +6,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import org.keycloak.common.util.SecretGenerator;
 
-/** Generation, salted hashing and constant-time comparison of the emailed one-time code. */
 public final class OtpCodes {
 
   private static final int SALT_BYTES = 16;
@@ -15,17 +14,14 @@ public final class OtpCodes {
     throw new UnsupportedOperationException("OtpCodes is a utility class");
   }
 
-  /** A code of {@code length} decimal digits, drawn from Keycloak's secure generator. */
   public static String generate(int length) {
     return SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
   }
 
-  /** A fresh per-code salt, so two users holding the same code do not share a hash. */
   public static String newSalt() {
     return SecretGenerator.getInstance().randomBytesHex(SALT_BYTES);
   }
 
-  /** SHA-256 over {@code salt:code}, hex encoded. The plaintext code is never stored. */
   public static String hash(String salt, String code) {
     try {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -36,7 +32,6 @@ public final class OtpCodes {
     }
   }
 
-  /** Constant-time comparison of {@code candidate} against a stored hash. */
   public static boolean matches(String salt, String expectedHash, String candidate) {
     if (expectedHash == null || candidate == null || candidate.isEmpty()) {
       return false;

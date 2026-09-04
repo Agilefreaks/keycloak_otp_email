@@ -3,10 +3,7 @@ package com.agilefreaks.keycloak.otp;
 import java.util.Map;
 import org.keycloak.models.AuthenticatorConfigModel;
 
-/**
- * Typed view of the execution config. Every limit is "0 disables this guard", so an operator can
- * relax one control without touching the others.
- */
+/** Typed view of the execution config. Every limit takes 0 to disable that guard alone. */
 public record OtpConfig(
     int codeLength,
     int codeTtlSeconds,
@@ -69,13 +66,11 @@ public record OtpConfig(
     return (value == null || value.isBlank()) ? "" : value.trim();
   }
 
-  /** A value that must be usable: a missing, unparseable or non-positive entry falls back. */
   private static int positive(Map<String, String> config, String key, int fallback) {
     int parsed = atLeastZero(config, key, fallback);
     return parsed > 0 ? parsed : fallback;
   }
 
-  /** A limit where {@code 0} legitimately means "guard disabled". */
   private static int atLeastZero(Map<String, String> config, String key, int fallback) {
     String value = text(config, key);
     if (value.isEmpty()) {
