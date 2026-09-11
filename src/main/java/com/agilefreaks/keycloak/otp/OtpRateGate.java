@@ -34,7 +34,8 @@ public class OtpRateGate {
               OtpKeys.emailDay(realmId, email),
               DAY_SECONDS,
               config.maxSendsPerEmailPerDay(),
-              Outcome.THROTTLED));
+              Outcome.THROTTLED,
+              Limit.EMAIL_DAY));
     }
     if (config.maxSendsPerIpPerHour() > 0 && ip != null && !ip.isBlank()) {
       guards.add(
@@ -42,7 +43,8 @@ public class OtpRateGate {
               OtpKeys.ipHour(realmId, ip),
               HOUR_SECONDS,
               config.maxSendsPerIpPerHour(),
-              Outcome.THROTTLED));
+              Outcome.THROTTLED,
+              Limit.IP_HOUR));
     }
     if (config.maxSendsPerRealmPerHour() > 0) {
       guards.add(
@@ -50,16 +52,18 @@ public class OtpRateGate {
               OtpKeys.realmHour(realmId),
               HOUR_SECONDS,
               config.maxSendsPerRealmPerHour(),
-              Outcome.BUDGET_EXHAUSTED));
+              Outcome.BUDGET_EXHAUSTED,
+              Limit.REALM_HOUR));
     }
 
     // Every guard is read before any is written, so a refusal never charges the ones that passed.
     List<CounterRecord> charged = new ArrayList<>(guards.size());
     for (Guard guard : guards) {
       CounterRecord current = currentCount(guard, now);
-      if (current.count() >= guard.limit()) {
+      if (current.count() >= guard.max()) {
         long elapsed = now - current.windowStartEpochSeconds();
-        return new Decision(guard.outcome(), Math.max(guard.windowSeconds() - elapsed, 1));
+        return new Decision(
+            guard.outcome(), guard.limit(), Math.max(guard.windowSeconds() - elapsed, 1));
       }
       charged.add(current.increment());
     }
@@ -67,7 +71,7 @@ public class OtpRateGate {
     for (int i = 0; i < guards.size(); i++) {
       store.put(guards.get(i).key(), charged.get(i).toNotes(), guards.get(i).windowSeconds());
     }
-    return new Decision(Outcome.ALLOW, 0);
+    return new Decision(Outcome.ALLOW, Limit.NONE, 0);
   }
 
   private CounterRecord currentCount(Guard guard, long now) {
@@ -78,7 +82,7 @@ public class OtpRateGate {
         .orElseGet(() -> new CounterRecord(0, now));
   }
 
-  private record Guard(String key, long windowSeconds, int limit, Outcome outcome) {}
+  private record Guard(String key, long windowSeconds, int max, Outcome outcome, Limit limit) {}
 
   public enum Outcome {
     ALLOW,
@@ -86,7 +90,21 @@ public class OtpRateGate {
     BUDGET_EXHAUSTED
   }
 
-  public record Decision(Outcome outcome, long retryAfterSeconds) {
+  /** Which guard refused, so a refusal can be reported as the specific one it was. */
+  public enum Limit {
+    NONE(""),
+    EMAIL_DAY("throttled_email"),
+    IP_HOUR("throttled_ip"),
+    REALM_HOUR("realm_budget");
+
+    public final String detail;
+
+    Limit(String detail) {
+      this.detail = detail;
+    }
+  }
+
+  public record Decision(Outcome outcome, Limit limit, long retryAfterSeconds) {
 
     public boolean allowed() {
       return outcome == Outcome.ALLOW;

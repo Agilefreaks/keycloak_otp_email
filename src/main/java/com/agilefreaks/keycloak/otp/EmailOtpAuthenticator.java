@@ -22,6 +22,10 @@ import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.AuthenticatorFactory;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
+import org.keycloak.events.Details;
+import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.models.AuthenticationExecutionModel.Requirement;
@@ -56,6 +60,26 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   static final String ATTR_CODE_LENGTH = "codeLength";
   static final String ATTR_MAX_ATTEMPTS_REACHED = "maxAttemptsReached";
 
+  static final String DETAIL_FLOW = "moma_flow";
+  static final String DETAIL_OTP_TTL = "moma_otp_ttl";
+  static final String DETAIL_RESEND = "moma_resend";
+  static final String DETAIL_REJECT = "moma_reject";
+  static final String DETAIL_RETRY_AFTER = "moma_retry_after";
+  static final String DETAIL_OTP_RESULT = "moma_otp_result";
+  static final String DETAIL_OTP_ATTEMPTS = "moma_otp_attempts";
+
+  static final String FLOW_BROWSER = "browser";
+  static final String FLOW_DIRECT_GRANT = "direct_grant";
+
+  static final String REJECT_COOLDOWN = "cooldown";
+  static final String REJECT_ATTESTATION = "attestation";
+  static final String REJECT_SEND_FAILED = "send_failed";
+
+  static final String RESULT_OK = "ok";
+  static final String RESULT_INVALID = "invalid";
+  static final String RESULT_EXPIRED = "expired";
+  static final String RESULT_ATTEMPTS_EXHAUSTED = "attempts_exhausted";
+
   static final String MSG_INVALID = "emailCodeInvalid";
   static final String MSG_EXPIRED = "emailCodeExpired";
   static final String MSG_TOO_MANY_ATTEMPTS = "emailCodeTooManyAttempts";
@@ -86,7 +110,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     }
     String otp = step.directGrant() ? step.form().getFirst(PARAM_OTP) : null;
     if (isBlank(otp)) {
-      sendCode(step);
+      sendCode(step, false);
     } else {
       verifyCode(step, otp.trim());
     }
@@ -100,7 +124,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       return;
     }
     if (step.form().containsKey(FIELD_RESEND)) {
-      sendCode(step);
+      sendCode(step, true);
       return;
     }
     String code = step.form().getFirst(FIELD_CODE);
@@ -158,9 +182,10 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
    * FAILURE_CHALLENGE}, which feeds the brute-force protector, and a cooldown, a send failure or a
    * request for a code is not a wrong credential. Reporting them as one locks users out.
    */
-  private void sendCode(Step step) {
+  private void sendCode(Step step, boolean resend) {
     OtpConfig config = step.config();
     if (!attestationAccepted(step)) {
+      recordSendRefused(step, REJECT_ATTESTATION, Errors.NOT_ALLOWED, 0);
       LOG.warnf(
           "Rejected a code request without a valid attestation token for '%s'",
           step.user().getId());
@@ -180,6 +205,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     if (pending != null && config.resendCooldownSeconds() > 0) {
       long remaining = config.resendCooldownSeconds() - (now - pending.sentAtEpochSeconds());
       if (remaining > 0) {
+        recordSendRefused(step, REJECT_COOLDOWN, Errors.NOT_ALLOWED, remaining);
         refuseThrottled(step, remaining);
         return;
       }
@@ -193,10 +219,14 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       LOG.warnf(
           "Realm '%s' has spent its hourly OTP budget; refusing to send more codes",
           realm.getName());
+      recordSendRefused(
+          step, decision.limit().detail, Errors.NOT_ALLOWED, decision.retryAfterSeconds());
       refuseUnavailable(step, "code sending is temporarily unavailable");
       return;
     }
     if (!decision.allowed()) {
+      recordSendRefused(
+          step, decision.limit().detail, Errors.NOT_ALLOWED, decision.retryAfterSeconds());
       refuseThrottled(step, decision.retryAfterSeconds());
       return;
     }
@@ -210,6 +240,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
       mail(step, code);
     } catch (EmailException | RuntimeException e) {
       LOG.warnf(e, "Could not mail a code to '%s'", step.user().getEmail());
+      recordSendRefused(step, REJECT_SEND_FAILED, Errors.EMAIL_SEND_FAILED, 0);
       refuseUnavailable(step, "could not send the code");
       return;
     }
@@ -218,6 +249,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
             step.key(),
             new OtpRecord(OtpCodes.hash(salt, code), salt, 0, now).toNotes(),
             config.codeTtlSeconds());
+    recordSent(step, resend);
 
     if (step.directGrant()) {
       step.context()
@@ -262,29 +294,106 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   }
 
   private enum Rejection {
-    NO_CODE(AuthenticationFlowError.EXPIRED_CODE, "Code expired or not requested", MSG_EXPIRED),
+    NO_CODE(
+        AuthenticationFlowError.EXPIRED_CODE,
+        "Code expired or not requested",
+        MSG_EXPIRED,
+        RESULT_EXPIRED,
+        Errors.EXPIRED_CODE),
     TOO_MANY_ATTEMPTS(
-        AuthenticationFlowError.INVALID_CREDENTIALS, "Too many attempts", MSG_TOO_MANY_ATTEMPTS),
-    INVALID(AuthenticationFlowError.INVALID_CREDENTIALS, "Invalid code", MSG_INVALID);
+        AuthenticationFlowError.INVALID_CREDENTIALS,
+        "Too many attempts",
+        MSG_TOO_MANY_ATTEMPTS,
+        RESULT_ATTEMPTS_EXHAUSTED,
+        Errors.INVALID_USER_CREDENTIALS),
+    INVALID(
+        AuthenticationFlowError.INVALID_CREDENTIALS,
+        "Invalid code",
+        MSG_INVALID,
+        RESULT_INVALID,
+        Errors.INVALID_USER_CREDENTIALS);
 
     final AuthenticationFlowError error;
     final String description;
     final String messageKey;
+    final String result;
+    final String eventError;
 
-    Rejection(AuthenticationFlowError error, String description, String messageKey) {
+    Rejection(
+        AuthenticationFlowError error,
+        String description,
+        String messageKey,
+        String result,
+        String eventError) {
       this.error = error;
       this.description = description;
       this.messageKey = messageKey;
+      this.result = result;
+      this.eventError = eventError;
     }
+  }
+
+  /** Null rejection means the code matched; attempts is how many it took. */
+  private record Check(Rejection rejection, int attempts) {}
+
+  /**
+   * Every outcome of this step arrives as a challenge or a failure carrying a Response, and
+   * Keycloak sends no event for either — so without these the step leaves no trace at all. They go
+   * on a clone: the flow owns the type of its own builder, and newEvent() would replace it.
+   */
+  private void recordSent(Step step, boolean resend) {
+    sendEvent(step)
+        .detail(DETAIL_OTP_TTL, String.valueOf(step.config().codeTtlSeconds()))
+        .detail(DETAIL_RESEND, String.valueOf(resend))
+        .success();
+  }
+
+  private void recordSendRefused(Step step, String reason, String error, long retryAfterSeconds) {
+    EventBuilder event = sendEvent(step).detail(DETAIL_REJECT, reason);
+    if (retryAfterSeconds > 0) {
+      event = event.detail(DETAIL_RETRY_AFTER, String.valueOf(retryAfterSeconds));
+    }
+    event.error(error);
+  }
+
+  private EventBuilder sendEvent(Step step) {
+    return step.context()
+        .getEvent()
+        .clone()
+        .event(EventType.SEND_VERIFY_EMAIL)
+        .user(step.user())
+        .detail(Details.EMAIL, step.user().getEmail())
+        .detail(DETAIL_FLOW, step.directGrant() ? FLOW_DIRECT_GRANT : FLOW_BROWSER);
+  }
+
+  /** A match rides on the flow's own event, which is about to become its LOGIN. */
+  private void recordVerified(Step step, int attempts) {
+    step.context()
+        .getEvent()
+        .detail(DETAIL_OTP_RESULT, RESULT_OK)
+        .detail(DETAIL_OTP_ATTEMPTS, String.valueOf(attempts));
+  }
+
+  private void recordVerifyFailed(Step step, Rejection rejection) {
+    step.context()
+        .getEvent()
+        .clone()
+        .event(EventType.LOGIN)
+        .user(step.user())
+        .detail(DETAIL_OTP_RESULT, rejection.result)
+        .error(rejection.eventError);
   }
 
   /** A wrong code is a credential failure and is reported as one; see {@link #sendCode}. */
   private void verifyCode(Step step, String submitted) {
-    Rejection rejection = checkCode(step, submitted);
+    Check check = checkCode(step, submitted);
+    Rejection rejection = check.rejection();
     if (rejection == null) {
+      recordVerified(step, check.attempts());
       step.context().success();
       return;
     }
+    recordVerifyFailed(step, rejection);
     if (step.directGrant()) {
       step.context()
           .failure(
@@ -304,27 +413,27 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     }
   }
 
-  /** Null when the code matched. */
-  private Rejection checkCode(Step step, String submitted) {
+  /** A null rejection means the code matched. */
+  private Check checkCode(Step step, String submitted) {
     OtpRecord record = step.store().get(step.key()).flatMap(OtpRecord::fromNotes).orElse(null);
     if (record == null) {
-      return Rejection.NO_CODE;
+      return new Check(Rejection.NO_CODE, 0);
     }
     int maxAttempts = step.config().maxAttempts();
     // Only reachable if maxAttempts was lowered while a code was already pending.
     if (record.exhausted(maxAttempts)) {
       step.store().remove(step.key());
-      return Rejection.TOO_MANY_ATTEMPTS;
+      return new Check(Rejection.TOO_MANY_ATTEMPTS, record.attempts());
     }
     if (OtpCodes.matches(record.salt(), record.hash(), submitted)) {
       step.store().remove(step.key());
-      return null;
+      return new Check(null, record.attempts() + 1);
     }
 
     OtpRecord bumped = record.withAttempt();
     if (bumped.exhausted(maxAttempts)) {
       step.store().remove(step.key());
-      return Rejection.TOO_MANY_ATTEMPTS;
+      return new Check(Rejection.TOO_MANY_ATTEMPTS, bumped.attempts());
     }
     // Re-stored with what is left of the original lifetime, never a fresh one. No failedLogin()
     // call either: reporting the credential failure already feeds the protector, and counting it
@@ -332,7 +441,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     long elapsed = clock.instant().getEpochSecond() - record.sentAtEpochSeconds();
     step.store()
         .put(step.key(), bumped.toNotes(), Math.max(step.config().codeTtlSeconds() - elapsed, 1));
-    return Rejection.INVALID;
+    return new Check(Rejection.INVALID, bumped.attempts());
   }
 
   private void challenge(Step step, FormMessage error) {
