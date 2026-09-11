@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -32,6 +33,7 @@ import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
 import org.keycloak.email.EmailTemplateProvider;
+import org.keycloak.events.EventBuilder;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
@@ -103,6 +105,7 @@ class EmailOtpAuthenticatorTest {
     when(ctx.getProtector()).thenReturn(protector);
     when(ctx.getAuthenticatorConfig()).thenReturn(model);
     when(request.getDecodedFormParameters()).thenReturn(form);
+    when(ctx.getEvent()).thenReturn(mock(EventBuilder.class, RETURNS_SELF));
     when(request.getHttpHeaders()).thenReturn(mock(HttpHeaders.class));
     when(connection.getRemoteAddr()).thenReturn("203.0.113.7");
   }

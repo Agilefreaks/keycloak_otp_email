@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -31,6 +32,7 @@ import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
 import org.keycloak.email.EmailTemplateProvider;
+import org.keycloak.events.EventBuilder;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
@@ -80,6 +82,7 @@ class EmailOtpBrowserFlowTest {
     config = new HashMap<>();
 
     when(ctx.getFlowPath()).thenReturn("authenticate");
+    when(ctx.getEvent()).thenReturn(mock(EventBuilder.class, RETURNS_SELF));
     when(ctx.getSession()).thenReturn(session);
     when(ctx.getRealm()).thenReturn(realm);
     when(ctx.getUser()).thenReturn(user);
