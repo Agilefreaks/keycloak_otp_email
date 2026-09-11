@@ -31,6 +31,7 @@ import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
+import org.keycloak.events.Details;
 import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.forms.login.LoginFormsProvider;
@@ -41,6 +42,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.FormMessage;
 import org.keycloak.services.managers.BruteForceProtector;
+import org.keycloak.sessions.AuthenticationSessionModel;
 import org.mockito.ArgumentCaptor;
 
 /** The same authenticator driven through a form flow ({@code getFlowPath() != "token"}). */
@@ -65,6 +67,7 @@ class EmailOtpBrowserFlowTest {
   private Response formResponse;
   private MultivaluedMap<String, String> formData;
   private Map<String, String> config;
+  private AuthenticationSessionModel authSession;
 
   @BeforeEach
   void setUp() {
@@ -75,6 +78,7 @@ class EmailOtpBrowserFlowTest {
     email = mock(EmailTemplateProvider.class);
     form = mock(LoginFormsProvider.class);
     protector = mock(BruteForceProtector.class);
+    authSession = mock(AuthenticationSessionModel.class);
     formResponse = Response.ok("the rendered form").build();
     HttpRequest request = mock(HttpRequest.class);
     ClientConnection connection = mock(ClientConnection.class);
@@ -90,6 +94,7 @@ class EmailOtpBrowserFlowTest {
     when(ctx.getConnection()).thenReturn(connection);
     when(ctx.getUriInfo()).thenReturn(mock(UriInfo.class));
     when(ctx.getProtector()).thenReturn(protector);
+    when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.form()).thenReturn(form);
     AuthenticatorConfigModel model = new AuthenticatorConfigModel();
     model.setConfig(config);
@@ -167,6 +172,40 @@ class EmailOtpBrowserFlowTest {
 
     verify(ctx).success();
     assertEquals(Optional.empty(), store.get(OtpKeys.code(USER_ID)));
+  }
+
+  @Test
+  void rememberMeMarksTheSessionSoTheIdentityCookieOutlivesTheBrowser() throws Exception {
+    config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
+    String code = enterAndReadMailedCode();
+    formData.putSingle(EmailOtpAuthenticator.FIELD_CODE, code);
+
+    authenticator.action(ctx);
+
+    verify(ctx).success();
+    verify(authSession).setAuthNote(Details.REMEMBER_ME, "true");
+  }
+
+  @Test
+  void rememberMeIsOffUnlessConfigured() throws Exception {
+    String code = enterAndReadMailedCode();
+    formData.putSingle(EmailOtpAuthenticator.FIELD_CODE, code);
+
+    authenticator.action(ctx);
+
+    verify(ctx).success();
+    verify(authSession, never()).setAuthNote(eq(Details.REMEMBER_ME), anyString());
+  }
+
+  @Test
+  void aWrongCodeRemembersNothing() throws Exception {
+    config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
+    enterAndReadMailedCode();
+    formData.putSingle(EmailOtpAuthenticator.FIELD_CODE, "000000");
+
+    authenticator.action(ctx);
+
+    verify(authSession, never()).setAuthNote(eq(Details.REMEMBER_ME), anyString());
   }
 
   @Test

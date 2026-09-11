@@ -374,12 +374,27 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         .error(rejection.eventError);
   }
 
+  /**
+   * Keycloak reads this note when it attaches the session: with it the identity cookie is
+   * persistent and survives a browser restart, without it the cookie dies with the browser. The
+   * realm's own Remember Me must be enabled too, or the note is ignored. There is no checkbox —
+   * a deployment that turns this on remembers every browser, which is the point for a consumer
+   * app where a re-login costs an email round trip.
+   */
+  private void rememberBrowser(Step step) {
+    if (step.directGrant() || !step.config().rememberMe()) {
+      return;
+    }
+    step.context().getAuthenticationSession().setAuthNote(Details.REMEMBER_ME, "true");
+  }
+
   /** A wrong code is a credential failure and is reported as one; see {@link #sendCode}. */
   private void verifyCode(Step step, String submitted) {
     Check check = checkCode(step, submitted);
     Rejection rejection = check.rejection();
     if (rejection == null) {
       recordVerified(step, check.attempts());
+      rememberBrowser(step);
       step.context().success();
       return;
     }
@@ -619,6 +634,14 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
             "Email subject key",
             "Message key resolved against the email theme's message bundle.",
             OtpConfig.DEFAULT_EMAIL_SUBJECT_KEY),
+        flagProperty(
+            OtpConfig.CONFIG_REMEMBER_ME,
+            "Remember this browser",
+            "Marks the session remember-me once the code is accepted, so the identity cookie "
+                + "survives a browser restart and the user is not sent back through an emailed "
+                + "code. Requires the realm's own Remember Me to be enabled, and applies to every "
+                + "browser login — there is no per-user checkbox. Ignored in a direct grant flow.",
+            OtpConfig.DEFAULT_REMEMBER_ME),
         property(
             OtpConfig.CONFIG_START_TOKEN_HEADER,
             "App attestation header",
@@ -631,6 +654,12 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
             "Endpoint the attestation token is POSTed to as 'token'; a JSON body with "
                 + "\"success\": false rejects the send. Empty = presence of the header is enough.",
             ""));
+  }
+
+  private static ProviderConfigProperty flagProperty(
+      String name, String label, String help, boolean defaultValue) {
+    return new ProviderConfigProperty(
+        name, label, help, ProviderConfigProperty.BOOLEAN_TYPE, String.valueOf(defaultValue));
   }
 
   private static ProviderConfigProperty property(

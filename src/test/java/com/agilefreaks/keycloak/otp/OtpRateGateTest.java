@@ -21,7 +21,18 @@ class OtpRateGateTest {
         store,
         clock,
         new OtpConfig(
-            6, 300, 60, 5, perEmailPerDay, perIpPerHour, perRealmPerHour, "", "", "code-email.ftl", "emailCodeSubject"));
+            6,
+            300,
+            60,
+            5,
+            perEmailPerDay,
+            perIpPerHour,
+            perRealmPerHour,
+            "",
+            "",
+            "code-email.ftl",
+            "emailCodeSubject",
+            false));
   }
 
   private void advanceSeconds(long seconds) {
