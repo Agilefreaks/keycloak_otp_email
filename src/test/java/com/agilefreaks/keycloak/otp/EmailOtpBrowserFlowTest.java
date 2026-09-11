@@ -8,7 +8,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -65,8 +65,6 @@ class EmailOtpBrowserFlowTest {
   private Response formResponse;
   private MultivaluedMap<String, String> formData;
   private Map<String, String> config;
-  private EventBuilder event;
-  private EventBuilder sideEvent;
 
   @BeforeEach
   void setUp() {
@@ -82,16 +80,9 @@ class EmailOtpBrowserFlowTest {
     ClientConnection connection = mock(ClientConnection.class);
     formData = new MultivaluedHashMap<>();
     config = new HashMap<>();
-    event = mock(EventBuilder.class);
-    sideEvent = mock(EventBuilder.class);
 
     when(ctx.getFlowPath()).thenReturn("authenticate");
-    when(ctx.getEvent()).thenReturn(event);
-    when(event.clone()).thenReturn(sideEvent);
-    when(event.detail(anyString(), nullable(String.class))).thenReturn(event);
-    when(sideEvent.event(any())).thenReturn(sideEvent);
-    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
-    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
+    when(ctx.getEvent()).thenReturn(mock(EventBuilder.class, RETURNS_SELF));
     when(ctx.getSession()).thenReturn(session);
     when(ctx.getRealm()).thenReturn(realm);
     when(ctx.getUser()).thenReturn(user);

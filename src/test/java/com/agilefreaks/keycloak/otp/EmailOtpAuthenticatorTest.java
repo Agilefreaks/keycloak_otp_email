@@ -8,7 +8,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -62,8 +62,6 @@ class EmailOtpAuthenticatorTest {
   private BruteForceProtector protector;
   private MultivaluedMap<String, String> form;
   private Map<String, String> config;
-  private EventBuilder event;
-  private EventBuilder sideEvent;
 
   @BeforeEach
   void setUp() {
@@ -75,8 +73,6 @@ class EmailOtpAuthenticatorTest {
     protector = mock(BruteForceProtector.class);
     form = new MultivaluedHashMap<>();
     config = new HashMap<>();
-    event = mock(EventBuilder.class);
-    sideEvent = mock(EventBuilder.class);
 
     when(realm.getId()).thenReturn(REALM_ID);
     when(realm.getName()).thenReturn("test-realm");
@@ -109,12 +105,7 @@ class EmailOtpAuthenticatorTest {
     when(ctx.getProtector()).thenReturn(protector);
     when(ctx.getAuthenticatorConfig()).thenReturn(model);
     when(request.getDecodedFormParameters()).thenReturn(form);
-    when(ctx.getEvent()).thenReturn(event);
-    when(event.clone()).thenReturn(sideEvent);
-    when(event.detail(anyString(), nullable(String.class))).thenReturn(event);
-    when(sideEvent.event(any())).thenReturn(sideEvent);
-    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
-    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
+    when(ctx.getEvent()).thenReturn(mock(EventBuilder.class, RETURNS_SELF));
     when(request.getHttpHeaders()).thenReturn(mock(HttpHeaders.class));
     when(connection.getRemoteAddr()).thenReturn("203.0.113.7");
   }

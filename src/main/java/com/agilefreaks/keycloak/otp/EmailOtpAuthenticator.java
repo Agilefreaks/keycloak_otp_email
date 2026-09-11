@@ -22,11 +22,11 @@ import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.AuthenticatorFactory;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
+import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.events.EventType;
-import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.models.AuthenticationExecutionModel.Requirement;
 import org.keycloak.models.KeycloakSession;
@@ -215,19 +215,17 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     OtpRateGate.Decision decision =
         new OtpRateGate(step.store(), clock, config)
             .reserve(realm.getId(), step.user().getEmail(), remoteAddress(step.context()));
-    if (decision.outcome() == OtpRateGate.Outcome.BUDGET_EXHAUSTED) {
-      LOG.warnf(
-          "Realm '%s' has spent its hourly OTP budget; refusing to send more codes",
-          realm.getName());
-      recordSendRefused(
-          step, decision.limit().detail, Errors.NOT_ALLOWED, decision.retryAfterSeconds());
-      refuseUnavailable(step, "code sending is temporarily unavailable");
-      return;
-    }
     if (!decision.allowed()) {
       recordSendRefused(
           step, decision.limit().detail, Errors.NOT_ALLOWED, decision.retryAfterSeconds());
-      refuseThrottled(step, decision.retryAfterSeconds());
+      if (decision.outcome() == OtpRateGate.Outcome.BUDGET_EXHAUSTED) {
+        LOG.warnf(
+            "Realm '%s' has spent its hourly OTP budget; refusing to send more codes",
+            realm.getName());
+        refuseUnavailable(step, "code sending is temporarily unavailable");
+      } else {
+        refuseThrottled(step, decision.retryAfterSeconds());
+      }
       return;
     }
 
@@ -333,14 +331,9 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     }
   }
 
-  /** Null rejection means the code matched; attempts is how many it took. */
+  /** Null rejection means the code matched. */
   private record Check(Rejection rejection, int attempts) {}
 
-  /**
-   * Every outcome of this step arrives as a challenge or a failure carrying a Response, and
-   * Keycloak sends no event for either — so without these the step leaves no trace at all. They go
-   * on a clone: the flow owns the type of its own builder, and newEvent() would replace it.
-   */
   private void recordSent(Step step, boolean resend) {
     sendEvent(step)
         .detail(DETAIL_OTP_TTL, String.valueOf(step.config().codeTtlSeconds()))
@@ -357,13 +350,18 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   }
 
   private EventBuilder sendEvent(Step step) {
-    return step.context()
-        .getEvent()
-        .clone()
-        .event(EventType.SEND_VERIFY_EMAIL)
-        .user(step.user())
+    return sideEvent(step, EventType.SEND_VERIFY_EMAIL)
         .detail(Details.EMAIL, step.user().getEmail())
         .detail(DETAIL_FLOW, step.directGrant() ? FLOW_DIRECT_GRANT : FLOW_BROWSER);
+  }
+
+  /**
+   * Every outcome of this step is a challenge or a failure carrying a Response, and Keycloak sends
+   * no event for either — so without these the step leaves no trace at all. They go on a clone:
+   * newEvent() would replace the flow's own builder and break its terminal LOGIN event.
+   */
+  private EventBuilder sideEvent(Step step, EventType type) {
+    return step.context().getEvent().clone().event(type).user(step.user());
   }
 
   /** A match rides on the flow's own event, which is about to become its LOGIN. */
@@ -375,11 +373,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   }
 
   private void recordVerifyFailed(Step step, Rejection rejection) {
-    step.context()
-        .getEvent()
-        .clone()
-        .event(EventType.LOGIN)
-        .user(step.user())
+    sideEvent(step, EventType.LOGIN)
         .detail(DETAIL_OTP_RESULT, rejection.result)
         .error(rejection.eventError);
   }
@@ -413,7 +407,6 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
     }
   }
 
-  /** A null rejection means the code matched. */
   private Check checkCode(Step step, String submitted) {
     OtpRecord record = step.store().get(step.key()).flatMap(OtpRecord::fromNotes).orElse(null);
     if (record == null) {

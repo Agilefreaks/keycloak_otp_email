@@ -5,7 +5,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -67,8 +67,8 @@ class EmailOtpEventsTest {
     realm = mock(RealmModel.class);
     user = mock(UserModel.class);
     email = mock(EmailTemplateProvider.class);
-    event = mock(EventBuilder.class);
-    sideEvent = mock(EventBuilder.class);
+    event = mock(EventBuilder.class, RETURNS_SELF);
+    sideEvent = mock(EventBuilder.class, RETURNS_SELF);
     form = new MultivaluedHashMap<>();
     config = new HashMap<>();
 
@@ -106,10 +106,6 @@ class EmailOtpEventsTest {
 
     when(ctx.getEvent()).thenReturn(event);
     when(event.clone()).thenReturn(sideEvent);
-    when(event.detail(anyString(), nullable(String.class))).thenReturn(event);
-    when(sideEvent.event(any())).thenReturn(sideEvent);
-    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
-    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
   }
 
   private void nextRequest() {
@@ -129,8 +125,6 @@ class EmailOtpEventsTest {
             attributes.capture());
     return String.valueOf(attributes.getValue().get("code"));
   }
-
-  // --- sending -------------------------------------------------------------
 
   @Test
   void mailedCode_isReportedAsASentVerificationEmail() {
@@ -220,8 +214,6 @@ class EmailOtpEventsTest {
         .detail(EmailOtpAuthenticator.DETAIL_REJECT, EmailOtpAuthenticator.REJECT_ATTESTATION);
     verify(sideEvent).error(Errors.NOT_ALLOWED);
   }
-
-  // --- verifying -----------------------------------------------------------
 
   @Test
   void correctCode_recordsTheResultOnTheFlowsOwnEvent() throws Exception {
