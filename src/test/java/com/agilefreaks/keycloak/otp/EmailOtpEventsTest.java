@@ -267,10 +267,7 @@ class EmailOtpEventsTest {
             EmailOtpAuthenticator.RESULT_ATTEMPTS_EXHAUSTED);
   }
 
-  /**
-   * Regression guard: newEvent() replaces the processor's builder, dropping the client id and auth
-   * method the flow already recorded and breaking its terminal LOGIN event.
-   */
+  /** Regression guard: newEvent() would replace the flow's builder and break its LOGIN event. */
   @Test
   void neverReplacesTheFlowsEventBuilder() {
     authenticator.authenticate(ctx);

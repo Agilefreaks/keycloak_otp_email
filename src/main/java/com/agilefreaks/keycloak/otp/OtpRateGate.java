@@ -86,7 +86,6 @@ public class OtpRateGate {
     BUDGET_EXHAUSTED
   }
 
-  /** Which guard refused, so a refusal can be reported as the specific one it was. */
   public enum Limit {
     NONE(Outcome.ALLOW, null),
     EMAIL_DAY(Outcome.THROTTLED, "throttled_email"),

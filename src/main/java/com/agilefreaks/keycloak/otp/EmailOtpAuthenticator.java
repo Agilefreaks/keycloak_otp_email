@@ -355,11 +355,7 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
         .detail(DETAIL_FLOW, step.directGrant() ? FLOW_DIRECT_GRANT : FLOW_BROWSER);
   }
 
-  /**
-   * Every outcome of this step is a challenge or a failure carrying a Response, and Keycloak sends
-   * no event for either — so without these the step leaves no trace at all. They go on a clone:
-   * newEvent() would replace the flow's own builder and break its terminal LOGIN event.
-   */
+  /** Keycloak sends no event for a challenge or a Response-carrying failure, so these are ours. */
   private EventBuilder sideEvent(Step step, EventType type) {
     return step.context().getEvent().clone().event(type).user(step.user());
   }
