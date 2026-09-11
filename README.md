@@ -107,6 +107,15 @@ dying with the browser. Stock Keycloak sets that note from the Remember Me
 checkbox on its username/password form — a passwordless realm has no such form,
 so the step that verifies the credential sets it instead.
 
+The note is only set on the flow paths `LoginActionsService` serves — the ones
+where a browser made the request. That is an allow-list, not an exclusion of
+direct grant: `attachSession` is shared by every grant that logs a user in, and
+CIBA reaches it without ever setting a flow path, so excluding only `token` would
+remember a backchannel login with no browser to remember. Remember-me is not
+merely a cookie flag either — it selects which pair of SSO lifespans the user
+session runs on, so setting it where no browser exists silently reschedules that
+session.
+
 **The realm's own Remember Me must be enabled.** This is not a no-op if it isn't:
 `AuthenticationManager` rejects a session created with remember-me against a realm
 that has the setting off, logging *"Session {0} invalid: created with remember me

@@ -198,6 +198,32 @@ class EmailOtpBrowserFlowTest {
   }
 
   @Test
+  void remembersNothingWhenNoBrowserServedTheRequest() throws Exception {
+    // CIBA attaches a session without ever setting a flow path; a deny-list would remember it.
+    config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
+    String code = enterAndReadMailedCode();
+    formData.putSingle(EmailOtpAuthenticator.FIELD_CODE, code);
+    when(ctx.getFlowPath()).thenReturn(null);
+
+    authenticator.action(ctx);
+
+    verify(ctx).success();
+    verify(authSession, never()).setAuthNote(eq(Details.REMEMBER_ME), anyString());
+  }
+
+  @Test
+  void remembersABrokerLoginToo() throws Exception {
+    config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
+    String code = enterAndReadMailedCode();
+    formData.putSingle(EmailOtpAuthenticator.FIELD_CODE, code);
+    when(ctx.getFlowPath()).thenReturn("first-broker-login");
+
+    authenticator.action(ctx);
+
+    verify(authSession).setAuthNote(Details.REMEMBER_ME, "true");
+  }
+
+  @Test
   void aWrongCodeRemembersNothing() throws Exception {
     config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
     enterAndReadMailedCode();

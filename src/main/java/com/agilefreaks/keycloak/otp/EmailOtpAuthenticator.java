@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
@@ -50,6 +51,21 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   public static final String ID = "email-otp";
 
   static final String FLOW_PATH_TOKEN = "token";
+
+  /**
+   * Flow paths {@code LoginActionsService} serves, which are the ones where a browser made the
+   * request. Allow-listed rather than excluding {@code token}: CIBA attaches a session without
+   * ever calling {@code setFlowPath}, so an exclusion would remember a backchannel login that has
+   * no browser, and any grant added later would inherit the same mistake.
+   */
+  static final Set<String> BROWSER_FLOW_PATHS =
+      Set.of(
+          "authenticate",
+          "registration",
+          "reset-credentials",
+          "required-action",
+          "first-broker-login",
+          "post-broker-login");
 
   static final String CODE_FORM_TEMPLATE = "email-code-form.ftl";
 
@@ -377,12 +393,17 @@ public class EmailOtpAuthenticator implements Authenticator, AuthenticatorFactor
   /**
    * Keycloak reads this note when it attaches the session: with it the identity cookie is
    * persistent and survives a browser restart, without it the cookie dies with the browser. The
-   * realm's own Remember Me must be enabled too, or the note is ignored. There is no checkbox —
-   * a deployment that turns this on remembers every browser, which is the point for a consumer
-   * app where a re-login costs an email round trip.
+   * realm's own Remember Me must be enabled too, or the session is rejected as invalid. There is
+   * no checkbox — a deployment that turns this on remembers every browser, which is the point for
+   * a consumer app where a re-login costs an email round trip.
+   *
+   * <p>Remember-me is not only a cookie: it also selects which pair of SSO lifespans the user
+   * session runs on, so setting it on a flow with no browser silently reschedules that session.
    */
   private void rememberBrowser(Step step) {
-    if (step.directGrant() || !step.config().rememberMe()) {
+    String flowPath = step.context().getFlowPath();
+    // Set.of() rejects a null argument outright, and CIBA leaves the flow path unset.
+    if (!step.config().rememberMe() || flowPath == null || !BROWSER_FLOW_PATHS.contains(flowPath)) {
       return;
     }
     step.context().getAuthenticationSession().setAuthNote(Details.REMEMBER_ME, "true");
