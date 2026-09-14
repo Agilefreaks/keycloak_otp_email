@@ -32,6 +32,7 @@ import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.email.EmailException;
+import org.keycloak.events.Details;
 import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.http.HttpRequest;
@@ -40,6 +41,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.services.managers.BruteForceProtector;
+import org.keycloak.sessions.AuthenticationSessionModel;
 import org.mockito.ArgumentCaptor;
 
 class EmailOtpAuthenticatorTest {
@@ -62,6 +64,7 @@ class EmailOtpAuthenticatorTest {
   private BruteForceProtector protector;
   private MultivaluedMap<String, String> form;
   private Map<String, String> config;
+  private AuthenticationSessionModel authSession;
 
   @BeforeEach
   void setUp() {
@@ -73,6 +76,7 @@ class EmailOtpAuthenticatorTest {
     protector = mock(BruteForceProtector.class);
     form = new MultivaluedHashMap<>();
     config = new HashMap<>();
+    authSession = mock(AuthenticationSessionModel.class);
 
     when(realm.getId()).thenReturn(REALM_ID);
     when(realm.getName()).thenReturn("test-realm");
@@ -97,6 +101,7 @@ class EmailOtpAuthenticatorTest {
     model.setConfig(config);
     when(ctx.getFlowPath()).thenReturn("token"); // what ROPC sets; the form flow sets something else
     when(ctx.getSession()).thenReturn(session);
+    when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.getRealm()).thenReturn(realm);
     when(ctx.getUser()).thenReturn(user);
     when(ctx.getHttpRequest()).thenReturn(request);
@@ -261,6 +266,19 @@ class EmailOtpAuthenticatorTest {
 
     assertEquals(400, captureChallenge().getStatus());
     verifyNoMailSent();
+  }
+
+  @Test
+  void neverRemembersTheBrowserEvenWhenRememberMeIsOn() throws Exception {
+    config.put(OtpConfig.CONFIG_REMEMBER_ME, "true");
+    String code = startAndReadMailedCode();
+    nextRequest();
+    form.putSingle("otp", code);
+
+    authenticator.authenticate(ctx);
+
+    verify(ctx).success();
+    verify(authSession, never()).setAuthNote(eq(Details.REMEMBER_ME), anyString());
   }
 
   @Test

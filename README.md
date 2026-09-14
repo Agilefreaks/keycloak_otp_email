@@ -94,6 +94,38 @@ code or being rate-limited never counts toward a lockout.
 A refused send short-circuits before the user lookup and before SMTP, so it costs
 a few local cache reads rather than a mail round trip.
 
+## Remembering the browser
+
+| Config | Default | Effect |
+|---|---|---|
+| `rememberMe` | `false` | On a correct code in the browser branch, marks the authentication session remember-me. Ignored in a direct grant flow. |
+
+Keycloak reads the `remember_me` auth note when it attaches the user session; with
+it, the identity cookie is persistent and bounded by the realm's
+`ssoSessionIdleTimeoutRememberMe` / `ssoSessionMaxLifespanRememberMe`, instead of
+dying with the browser. Stock Keycloak sets that note from the Remember Me
+checkbox on its username/password form — a passwordless realm has no such form,
+so the step that verifies the credential sets it instead.
+
+The note is only set on the flow paths `LoginActionsService` serves — the ones
+where a browser made the request. That is an allow-list, not an exclusion of
+direct grant: `attachSession` is shared by every grant that logs a user in, and
+CIBA reaches it without ever setting a flow path, so excluding only `token` would
+remember a backchannel login with no browser to remember. Remember-me is not
+merely a cookie flag either — it selects which pair of SSO lifespans the user
+session runs on, so setting it where no browser exists silently reschedules that
+session.
+
+**The realm's own Remember Me must be enabled.** This is not a no-op if it isn't:
+`AuthenticationManager` rejects a session created with remember-me against a realm
+that has the setting off, logging *"Session {0} invalid: created with remember me
+but remember me is disabled for the realm"*. Turn on both, or neither.
+
+There is no checkbox and no per-user opt-out — every browser login is remembered.
+That is the point for a consumer deployment, where sending someone back through an
+emailed code is the expensive outcome; a deployment that wants the user to choose
+should leave this off.
+
 ## The theme
 
 The browser branch renders `email-code-form.ftl` from the login theme and expects

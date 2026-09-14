@@ -15,7 +15,8 @@ public record OtpConfig(
     String startTokenHeader,
     String startTokenVerifyUrl,
     String emailTemplate,
-    String emailSubjectKey) {
+    String emailSubjectKey,
+    boolean rememberMe) {
 
   public static final String CONFIG_CODE_LENGTH = "codeLength";
   public static final String CONFIG_CODE_TTL_SECONDS = "codeTtlSeconds";
@@ -28,6 +29,7 @@ public record OtpConfig(
   public static final String CONFIG_START_TOKEN_VERIFY_URL = "startTokenVerifyUrl";
   public static final String CONFIG_EMAIL_TEMPLATE = "emailTemplate";
   public static final String CONFIG_EMAIL_SUBJECT_KEY = "emailSubjectKey";
+  public static final String CONFIG_REMEMBER_ME = "rememberMe";
 
   public static final int DEFAULT_CODE_LENGTH = 6;
   public static final int DEFAULT_CODE_TTL_SECONDS = 300;
@@ -38,6 +40,7 @@ public record OtpConfig(
   public static final int DEFAULT_MAX_SENDS_PER_REALM_PER_HOUR = 500;
   public static final String DEFAULT_EMAIL_TEMPLATE = "code-email.ftl";
   public static final String DEFAULT_EMAIL_SUBJECT_KEY = "emailCodeSubject";
+  public static final boolean DEFAULT_REMEMBER_ME = false;
 
   public static OtpConfig from(AuthenticatorConfigModel model) {
     Map<String, String> config =
@@ -54,12 +57,18 @@ public record OtpConfig(
         text(config, CONFIG_START_TOKEN_HEADER, ""),
         text(config, CONFIG_START_TOKEN_VERIFY_URL, ""),
         text(config, CONFIG_EMAIL_TEMPLATE, DEFAULT_EMAIL_TEMPLATE),
-        text(config, CONFIG_EMAIL_SUBJECT_KEY, DEFAULT_EMAIL_SUBJECT_KEY));
+        text(config, CONFIG_EMAIL_SUBJECT_KEY, DEFAULT_EMAIL_SUBJECT_KEY),
+        flag(config, CONFIG_REMEMBER_ME, DEFAULT_REMEMBER_ME));
   }
 
   private static String text(Map<String, String> config, String key, String fallback) {
     String value = config.get(key);
     return (value == null || value.isBlank()) ? fallback : value.trim();
+  }
+
+  private static boolean flag(Map<String, String> config, String key, boolean fallback) {
+    String value = text(config, key, "");
+    return value.isEmpty() ? fallback : Boolean.parseBoolean(value);
   }
 
   private static int number(Map<String, String> config, String key, int min, int fallback) {
